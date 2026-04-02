@@ -906,8 +906,10 @@ function endGame(won, remaining) {
 }
 
 // ============ DRAW (Three.js) ============
-// Reusable colour for stun flash
-const _stunColor = new THREE.Color();
+// Cached colour objects – avoids per-frame allocations
+const _tmpColor = new THREE.Color();
+const _emissiveOn  = new THREE.Color(0.4, 0.25, 0);
+const _emissiveOff = new THREE.Color(0, 0, 0);
 
 function draw() {
   if (!renderer) return;
@@ -937,12 +939,8 @@ function draw() {
     // Stun flash: orange emissive glow
     mesh.traverse(child => {
       if (!child.isMesh) return;
-      if (e.stunTimer > 0) {
-        child.material.emissive = child.material.emissive || new THREE.Color();
-        child.material.emissive.setRGB(0.4, 0.25, 0);
-      } else if (child.material.emissive) {
-        child.material.emissive.setRGB(0, 0, 0);
-      }
+      const target = e.stunTimer > 0 ? _emissiveOn : _emissiveOff;
+      if (child.material.emissive) child.material.emissive.copy(target);
     });
   }
 
@@ -976,13 +974,13 @@ function draw() {
   for (const p of particles) {
     if (idx >= MAX_PARTICLES_3D) break;
     const alpha = p.life / p.maxLife;
-    const c = new THREE.Color(p.color);
+    _tmpColor.set(p.color);
     particlePositions[idx*3]   = p.x;
     particlePositions[idx*3+1] = 4 + alpha * (3 + Math.random() * 6);
     particlePositions[idx*3+2] = p.y;
-    particleColors[idx*3]   = c.r * alpha;
-    particleColors[idx*3+1] = c.g * alpha;
-    particleColors[idx*3+2] = c.b * alpha;
+    particleColors[idx*3]   = _tmpColor.r * alpha;
+    particleColors[idx*3+1] = _tmpColor.g * alpha;
+    particleColors[idx*3+2] = _tmpColor.b * alpha;
     idx++;
   }
   for (let i = idx; i < MAX_PARTICLES_3D; i++) particlePositions[i*3+1] = -9999;
