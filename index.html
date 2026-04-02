@@ -88,6 +88,25 @@ canvas { display: block; }
 #controls-hint {
   margin-top: 20px; color: #888; font-size: 13px; text-align: center;
 }
+
+#toddler-toggle {
+  margin-top: 14px; display: flex; align-items: center; gap: 10px;
+  background: #1a1a1a; border: 2px solid #555; border-radius: 8px;
+  padding: 10px 18px; cursor: pointer; pointer-events: auto;
+  transition: all 0.2s; color: #ccc; font-size: 15px;
+}
+#toddler-toggle:hover { border-color: #f80; }
+#toddler-toggle.active { border-color: #0f0; background: #0a2000; color: #0f0; }
+#toddler-toggle .tod-icon { font-size: 22px; }
+
+#weapon-indicator {
+  position: absolute; bottom: 30px; left: 10px; color: #fff;
+  font-size: 14px; text-shadow: 2px 2px 4px #000; display: none;
+}
+#effect-indicators {
+  position: absolute; bottom: 55px; left: 10px; color: #fff;
+  font-size: 13px; text-shadow: 2px 2px 4px #000; display: none;
+}
 </style>
 </head>
 <body>
@@ -104,6 +123,8 @@ canvas { display: block; }
   </div>
   <div id="score-display" style="display:none;">SCORE: 0</div>
   <div id="message"></div>
+  <div id="weapon-indicator">WEAPON: —</div>
+  <div id="effect-indicators"></div>
 </div>
 
 <div id="menu">
@@ -111,9 +132,14 @@ canvas { display: block; }
   <h2>Choose Your Ride</h2>
   <div class="vehicle-select" id="vehicle-select"></div>
   <button id="start-btn">START</button>
+  <div id="toddler-toggle" onclick="toggleToddler()">
+    <span class="tod-icon">🍼</span>
+    <span id="toddler-label">Toddler Mode: OFF — Full manual control (WASD/Arrows + Space)</span>
+  </div>
   <div id="controls-hint">
-    WASD / Arrow Keys to drive &bull; SPACE for boost<br>
-    Smash into enemies to destroy them. Last one standing wins!
+    WASD / Arrow Keys to drive &bull; SPACE for boost &bull; F to fire weapon<br>
+    Smash enemies to score! Reach 2000 pts to win — enemies keep spawning!<br>
+    🔧 Drive to repair stations to heal &bull; ⚡🛡️💣 Pick up items for upgrades
   </div>
 </div>
 
@@ -178,6 +204,32 @@ let keys = {};
 let shakeTimer = 0;
 let shakeIntensity = 0;
 
+// New state
+let toddlerMode = false;
+let pickups = [];
+let repairStations = [];
+let enemySpawnTimer = 0;
+const ENEMY_SPAWN_INTERVAL = 10; // seconds between new enemy waves
+let highScore = parseInt(localStorage.getItem('demolitionHighScore') || '0');
+let playerWeapon = null;  // { type, charges }
+let playerEffects = {};   // { speed: timeRemaining, armor: timeRemaining }
+const MAX_ENEMIES = 15;
+let pickupRespawnTimers = []; // pending setTimeout IDs
+
+// Toddler mode toggle
+function toggleToddler() {
+  toddlerMode = !toddlerMode;
+  const tog = document.getElementById('toddler-toggle');
+  const lbl = document.getElementById('toddler-label');
+  if (toddlerMode) {
+    tog.classList.add('active');
+    lbl.textContent = 'Toddler Mode: OFF — Full manual control (WASD/Arrows + Space)';
+  } else {
+    tog.classList.remove('active');
+    lbl.textContent = 'Toddler Mode: ON — Throttle is automatic, just steer!';
+  }
+}
+
 function resize() {
   W = canvas.width = window.innerWidth;
   H = canvas.height = window.innerHeight;
@@ -202,7 +254,11 @@ ROSTER.forEach(r => {
 document.getElementById('start-btn').onclick = startGame;
 
 // ============ INPUT ============
-window.addEventListener('keydown', e => { keys[e.code] = true; if(e.code==='Space') e.preventDefault(); });
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') e.preventDefault();
+  if (e.code === 'KeyF' && gameRunning) useWeapon();
+});
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 
 // ============ ENTITY ============
@@ -228,12 +284,20 @@ function startGame() {
   document.getElementById('hud').style.display = 'block';
   document.getElementById('score-display').style.display = 'block';
   document.getElementById('message').style.display = 'none';
+  document.getElementById('weapon-indicator').style.display = 'block';
+  document.getElementById('effect-indicators').style.display = 'block';
 
   arenaRadius = ARENA_RADIUS;
   entities = [];
   particles = [];
   score = 0;
   gameRunning = true;
+  enemySpawnTimer = ENEMY_SPAWN_INTERVAL;
+  playerWeapon = null;
+  playerEffects = {};
+  // Cancel any pending pickup respawn timers from previous games
+  pickupRespawnTimers.forEach(id => clearTimeout(id));
+  pickupRespawnTimers = [];
 
   const pDef = ROSTER.find(r => r.id === selectedId);
   player = createEntity(pDef, 0, 0, 0, true);
@@ -248,6 +312,20 @@ function startGame() {
     const e = createEntity(def, Math.cos(angle) * dist, Math.sin(angle) * dist, angle + Math.PI, false);
     entities.push(e);
   }
+
+  // Fixed repair stations at 3 positions in the arena
+  repairStations = [
+    { x: 160, y: 0,    label: '🔧', color: '#0f4', radius: 28, healRate: 18 },
+    { x: -80, y: 140,  label: '🔧', color: '#0f4', radius: 28, healRate: 18 },
+    { x: -80, y: -140, label: '🔧', color: '#0f4', radius: 28, healRate: 18 },
+  ];
+
+  // Spawn initial pickups
+  pickups = [];
+  spawnPickup('weapon');
+  spawnPickup('speed');
+  spawnPickup('armor');
+  spawnPickup('weapon');
 }
 
 // ============ PARTICLES ============
@@ -269,6 +347,64 @@ function spawnExplosion(x, y) {
   spawnParticles(x, y, '#f00', 15, 5);
   shakeTimer = 0.3;
   shakeIntensity = 8;
+}
+
+// ============ ENEMY SPAWNING ============
+function spawnEnemy() {
+  const angle = Math.random() * Math.PI * 2;
+  const dist = arenaRadius * 0.75;
+  const def = ROSTER[Math.floor(Math.random() * ROSTER.length)];
+  const e = createEntity(def, Math.cos(angle) * dist, Math.sin(angle) * dist, angle + Math.PI, false);
+  entities.push(e);
+  spawnParticles(e.x, e.y, '#f80', 12, 4);
+}
+
+// ============ PICKUPS ============
+const PICKUP_DEFS = {
+  weapon: { icon: '💣', color: '#f40', label: 'BLAST', desc: 'Blast Weapon' },
+  speed:  { icon: '⚡', color: '#ff0', label: 'SPEED', desc: 'Speed Boost' },
+  armor:  { icon: '🛡️', color: '#48f', label: 'ARMOR', desc: 'Armor Up'  },
+};
+
+function spawnPickup(type) {
+  let px, py, attempts = 0;
+  do {
+    const a = Math.random() * Math.PI * 2;
+    const d = 60 + Math.random() * (arenaRadius * 0.65);
+    px = Math.cos(a) * d;
+    py = Math.sin(a) * d;
+    attempts++;
+  } while (attempts < 20 && pickups.some(p => Math.hypot(p.x - px, p.y - py) < 50));
+  const def = PICKUP_DEFS[type];
+  pickups.push({ x: px, y: py, type, icon: def.icon, color: def.color, label: def.label, pulse: 0 });
+}
+
+// ============ WEAPON USE ============
+function useWeapon() {
+  if (!playerWeapon || !player || !player.alive) return;
+  if (playerWeapon.type === 'weapon') {
+    // Blast: AoE damage around player
+    const blastRadius = 120;
+    shakeTimer = 0.4;
+    shakeIntensity = 10;
+    spawnParticles(player.x, player.y, '#f80', 40, 8);
+    spawnParticles(player.x, player.y, '#ff0', 30, 6);
+    for (const e of entities) {
+      if (!e.alive || e.isPlayer) continue;
+      const d = Math.hypot(e.x - player.x, e.y - player.y);
+      if (d < blastRadius) {
+        const dmg = 60 * (1 - d / blastRadius);
+        e.hp -= dmg;
+        e.stunTimer = 0.5;
+        const nx = (e.x - player.x) / Math.max(d, 1);
+        const ny = (e.y - player.y) / Math.max(d, 1);
+        e.knockbackX += nx * 8;
+        e.knockbackY += ny * 8;
+        if (e.hp <= 0 && e.alive) { e.alive = false; spawnExplosion(e.x, e.y); score += 150; }
+      }
+    }
+    playerWeapon = null;
+  }
 }
 
 // ============ AI ============
@@ -351,10 +487,11 @@ function handleCollisions() {
         const impactSpeed = Math.abs(relVx * nx + relVy * ny);
 
         if (impactSpeed > 1.5) {
-          // Damage
+          // Damage — player takes 1.5x (realistic) unless armored
           const baseDmg = impactSpeed * 3;
-          const dmgToB = baseDmg * (a.mass / b.mass) * (a.isBoosting ? 1.8 : 1);
-          const dmgToA = baseDmg * (b.mass / a.mass) * (b.isBoosting ? 1.8 : 1);
+          const armorMult = (playerEffects.armor && (a.isPlayer || b.isPlayer)) ? 0.4 : 1;
+          const dmgToB = baseDmg * (a.mass / b.mass) * (a.isBoosting ? 1.8 : 1) * (b.isPlayer ? 1.5 * armorMult : 1);
+          const dmgToA = baseDmg * (b.mass / a.mass) * (b.isBoosting ? 1.8 : 1) * (a.isPlayer ? 1.5 * armorMult : 1);
 
           b.hp -= dmgToB;
           a.hp -= dmgToA;
@@ -404,28 +541,46 @@ function update(dt) {
 
   // Player input
   if (player && player.alive && player.stunTimer <= 0) {
-    const left = keys['ArrowLeft'] || keys['KeyA'];
+    const left  = keys['ArrowLeft']  || keys['KeyA'];
     const right = keys['ArrowRight'] || keys['KeyD'];
-    const up = keys['ArrowUp'] || keys['KeyW'];
-    const down = keys['ArrowDown'] || keys['KeyS'];
+    const up    = keys['ArrowUp']    || keys['KeyW'];
+    const down  = keys['ArrowDown']  || keys['KeyS'];
     const boost = keys['Space'];
 
-    if (left) player.angle -= player.turnSpeed * dt * 60;
+    if (left)  player.angle -= player.turnSpeed * dt * 60;
     if (right) player.angle += player.turnSpeed * dt * 60;
 
     let accel = 0;
-    if (up) accel = player.speed;
-    if (down) accel = -player.speed * 0.5;
+    if (toddlerMode) {
+      // AI throttle: always move forward; AI steers slightly away from arena edge
+      accel = player.speed * 0.75;
+      const distC = Math.hypot(player.x, player.y);
+      if (distC > arenaRadius * 0.7 && !left && !right) {
+        const inward = Math.atan2(-player.y, -player.x);
+        let d = inward - player.angle;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        player.angle += Math.sign(d) * Math.min(Math.abs(d), player.turnSpeed * dt * 60 * 1.5);
+      }
+      // Still allow manual down to brake
+      if (down) accel = -player.speed * 0.3;
+    } else {
+      if (up)   accel = player.speed;
+      if (down) accel = -player.speed * 0.5;
+    }
+
+    // Apply speed effect
+    const speedMult = playerEffects.speed ? 2.0 : 1.0;
 
     player.isBoosting = false;
-    if (boost && player.boost > 0 && up) {
+    if (boost && player.boost > 0 && (up || toddlerMode)) {
       accel *= 1.8;
       player.boost -= dt * 60;
       player.isBoosting = true;
     }
 
-    player.vx += Math.cos(player.angle) * accel * dt * 60 * 0.08;
-    player.vy += Math.sin(player.angle) * accel * dt * 60 * 0.08;
+    player.vx += Math.cos(player.angle) * accel * speedMult * dt * 60 * 0.08;
+    player.vy += Math.sin(player.angle) * accel * speedMult * dt * 60 * 0.08;
   }
 
   // Boost regeneration
@@ -492,6 +647,65 @@ function update(dt) {
 
   handleCollisions();
 
+  // ---- Enemy spawning ----
+  enemySpawnTimer -= dt;
+  const aliveEnemyCount = entities.filter(e => !e.isPlayer && e.alive).length;
+  if (enemySpawnTimer <= 0 || aliveEnemyCount < 3) {
+    if (aliveEnemyCount < MAX_ENEMIES) {
+      spawnEnemy();
+      if (aliveEnemyCount + 2 <= MAX_ENEMIES) spawnEnemy(); // spawn 2 at a time if room
+    }
+    enemySpawnTimer = ENEMY_SPAWN_INTERVAL;
+  }
+
+  // ---- Player effects timers ----
+  if (player && player.alive) {
+    if (playerEffects.speed) {
+      playerEffects.speed -= dt;
+      if (playerEffects.speed <= 0) delete playerEffects.speed;
+    }
+    if (playerEffects.armor) {
+      playerEffects.armor -= dt;
+      if (playerEffects.armor <= 0) delete playerEffects.armor;
+    }
+  }
+
+  // ---- Repair stations ----
+  if (player && player.alive) {
+    for (const rs of repairStations) {
+      const d = Math.hypot(player.x - rs.x, player.y - rs.y);
+      if (d < rs.radius + player.size) {
+        player.hp = Math.min(player.maxHp, player.hp + rs.healRate * dt);
+        spawnParticles(rs.x, rs.y, '#0f4', 1, 1.5);
+      }
+    }
+  }
+
+  // ---- Pickup collection ----
+  if (player && player.alive) {
+    pickups = pickups.filter(pk => {
+      const d = Math.hypot(player.x - pk.x, player.y - pk.y);
+      if (d < 24 + player.size) {
+        // Collect!
+        if (pk.type === 'weapon') {
+          playerWeapon = { type: 'weapon', charges: 1 };
+        } else if (pk.type === 'speed') {
+          playerEffects.speed = 6; // 6 seconds
+        } else if (pk.type === 'armor') {
+          playerEffects.armor = 8; // 8 seconds
+        }
+        score += 10;
+        spawnParticles(pk.x, pk.y, pk.color, 14, 5);
+        // Respawn same pickup type somewhere else after delay
+        const tid = setTimeout(() => { if (gameRunning) spawnPickup(pk.type); }, 8000);
+        pickupRespawnTimers.push(tid);
+        return false;
+      }
+      pk.pulse = (pk.pulse || 0) + dt * 3;
+      return true;
+    });
+  }
+
   // Particles
   for (const p of particles) {
     p.x += p.vx;
@@ -509,8 +723,8 @@ function update(dt) {
   const aliveEnemies = entities.filter(e => !e.isPlayer && e.alive).length;
   if (player && !player.alive) {
     endGame(false, aliveEnemies);
-  } else if (aliveEnemies === 0 && player && player.alive) {
-    endGame(true, 0);
+  } else if (score >= 2000 && player && player.alive) {
+    endGame(true, aliveEnemies); // Score milestone victory
   }
 
   // Update HUD
@@ -525,27 +739,52 @@ function updateHUD(aliveEnemies) {
   hpBar.style.backgroundColor = hpPct > 50 ? '#0f0' : hpPct > 25 ? '#fa0' : '#f00';
 
   document.getElementById('boost-bar').style.width = player.boost + '%';
-  document.getElementById('score-display').textContent = 'SCORE: ' + score;
-  document.getElementById('alive-count').textContent =
-    'Opponents: ' + (aliveEnemies) + ' / 11';
+  document.getElementById('score-display').textContent = 'SCORE: ' + score + '  |  BEST: ' + Math.max(score, highScore);
+  document.getElementById('alive-count').textContent = 'Opponents alive: ' + aliveEnemies;
+
+  // Weapon indicator
+  const wEl = document.getElementById('weapon-indicator');
+  if (playerWeapon) {
+    wEl.innerHTML = '💣 BLAST READY — press <b>F</b> to fire!';
+    wEl.style.color = '#f80';
+  } else {
+    wEl.innerHTML = 'No weapon (pick up 💣)';
+    wEl.style.color = '#666';
+  }
+
+  // Active effects
+  const efEl = document.getElementById('effect-indicators');
+  let efText = '';
+  if (playerEffects.speed) efText += `⚡ SPEED x2 ${playerEffects.speed.toFixed(1)}s  `;
+  if (playerEffects.armor) efText += `🛡️ ARMOR ${playerEffects.armor.toFixed(1)}s`;
+  efEl.textContent = efText;
 }
 
 function endGame(won, remaining) {
   gameRunning = false;
+  if (score > highScore) {
+    highScore = score;
+    localStorage.setItem('demolitionHighScore', highScore);
+  }
   const msg = document.getElementById('message');
   msg.style.display = 'block';
+  const newBest = score >= highScore ? ' 🏅 NEW BEST!' : '';
   if (won) {
-    msg.innerHTML = '🏆 VICTORY! 🏆<br><span style="font-size:24px">Score: ' + score +
-      '</span><br><span style="font-size:18px; color:#aaa">Click to play again</span>';
+    msg.innerHTML = '🏆 CHAMPION! 🏆<br><span style="font-size:24px">Score: ' + score + newBest +
+      '</span><br><span style="font-size:18px; color:#fa0">You reached 2000 points!</span>' +
+      '<br><span style="font-size:18px; color:#aaa">Click to play again</span>';
   } else {
     msg.innerHTML = '💥 WRECKED! 💥<br><span style="font-size:24px">Score: ' + score +
-      ' &bull; ' + remaining + ' left</span><br><span style="font-size:18px; color:#aaa">Click to play again</span>';
+      ' &bull; ' + remaining + ' left' + newBest +
+      '</span><br><span style="font-size:18px; color:#aaa">Click to play again</span>';
   }
   msg.onclick = () => {
     msg.style.display = 'none';
     document.getElementById('menu').style.display = 'flex';
     document.getElementById('hud').style.display = 'none';
     document.getElementById('score-display').style.display = 'none';
+    document.getElementById('weapon-indicator').style.display = 'none';
+    document.getElementById('effect-indicators').style.display = 'none';
   };
 }
 
@@ -612,6 +851,48 @@ function draw() {
       ctx.fill();
     }
   }
+
+  // ---- Draw repair stations ----
+  for (const rs of repairStations) {
+    const pulse = (Date.now() / 600) % (Math.PI * 2);
+    const glow = 0.25 + 0.15 * Math.sin(pulse);
+    ctx.beginPath();
+    ctx.arc(rs.x, rs.y, rs.radius, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(0,200,80,${glow})`;
+    ctx.fill();
+    ctx.strokeStyle = '#0f4';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.font = '20px serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(rs.label, rs.x, rs.y + 7);
+    ctx.fillStyle = '#afffcb';
+    ctx.font = 'bold 9px Arial';
+    ctx.fillText('REPAIR', rs.x, rs.y + rs.radius + 12);
+  }
+
+  // ---- Draw pickups ----
+  for (const pk of pickups) {
+    const pulse = 0.6 + 0.4 * Math.sin(pk.pulse || 0);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(pk.x, pk.y, 20, 0, Math.PI * 2);
+    ctx.fillStyle = pk.color + '44';
+    ctx.fill();
+    ctx.strokeStyle = pk.color;
+    ctx.lineWidth = 2 * pulse;
+    ctx.stroke();
+    ctx.restore();
+    ctx.font = '18px serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(pk.icon, pk.x, pk.y + 6);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 8px Arial';
+    ctx.fillText(pk.label, pk.x, pk.y + 20);
+  }
+
+  // ---- In-world scoreboard ----
+  drawWorldScoreboard();
 
   // Entities
   for (const e of entities) {
@@ -720,6 +1001,33 @@ function draw() {
   drawMinimap();
 }
 
+function drawWorldScoreboard() {
+  if (!gameRunning) return;
+  // Drawn in world-space (called inside the ctx.save/translate block)
+  const bx = -arenaRadius + 10, by = -arenaRadius + 10;
+  const bw = 148, bh = 68;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.strokeStyle = '#f80';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(bx, by, bw, bh, 8);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#f80';
+  ctx.font = 'bold 11px Arial Black, Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText('📋 SCOREBOARD', bx + 8, by + 18);
+
+  ctx.fillStyle = '#ff0';
+  ctx.font = 'bold 13px Arial';
+  ctx.fillText('SCORE: ' + score, bx + 8, by + 36);
+
+  ctx.fillStyle = '#0cf';
+  ctx.fillText('BEST:  ' + Math.max(score, highScore), bx + 8, by + 54);
+}
+
 function drawMinimap() {
   const mmSize = 100;
   const mmX = W - mmSize - 15;
@@ -741,6 +1049,26 @@ function drawMinimap() {
     ctx.fillStyle = e.isPlayer ? '#0ff' : '#f44';
     ctx.beginPath();
     ctx.arc(mx, my, e.isPlayer ? 4 : 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Repair stations on minimap
+  for (const rs of repairStations) {
+    const mx = mmX + mmSize/2 + rs.x * scale;
+    const my = mmY + mmSize/2 + rs.y * scale;
+    ctx.fillStyle = '#0f4';
+    ctx.beginPath();
+    ctx.arc(mx, my, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Pickups on minimap
+  for (const pk of pickups) {
+    const mx = mmX + mmSize/2 + pk.x * scale;
+    const my = mmY + mmSize/2 + pk.y * scale;
+    ctx.fillStyle = pk.color;
+    ctx.beginPath();
+    ctx.arc(mx, my, 2.5, 0, Math.PI * 2);
     ctx.fill();
   }
 }
