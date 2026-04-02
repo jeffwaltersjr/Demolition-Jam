@@ -6,7 +6,7 @@
 <title>Demolition Jam</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: #111; overflow: hidden; font-family: 'Arial Black', Arial, sans-serif; }
+body { background: #000; overflow: hidden; font-family: 'Arial Black', Arial, sans-serif; }
 canvas { display: block; }
 
 #ui-overlay {
@@ -43,10 +43,38 @@ canvas { display: block; }
   font-size: 24px; text-shadow: 2px 2px 4px #000;
 }
 
+#speed-display {
+  position: absolute; bottom: 140px; left: 10px; color: #fa0;
+  font-size: 20px; text-shadow: 2px 2px 4px #000; display: none;
+}
+
 #message {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
   color: #fff; font-size: 48px; text-shadow: 3px 3px 6px #000;
   display: none; text-align: center; pointer-events: auto;
+}
+
+/* First-person crosshair */
+#crosshair {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 28px; height: 28px;
+  pointer-events: none; z-index: 15; display: none;
+}
+#crosshair::before, #crosshair::after {
+  content: ''; position: absolute; background: rgba(255,255,255,0.75);
+  border-radius: 2px;
+}
+#crosshair::before { width: 2px; height: 100%; left: calc(50% - 1px); }
+#crosshair::after  { width: 100%; height: 2px; top: calc(50% - 1px); }
+
+/* Minimap overlay canvas */
+#minimap-canvas {
+  position: absolute; bottom: 15px; right: 15px;
+  border-radius: 50%; z-index: 15;
+  pointer-events: none; display: none;
+  border: 2px solid #f00;
+  box-shadow: 0 0 10px rgba(255,0,0,0.4);
 }
 
 #menu {
@@ -93,6 +121,8 @@ canvas { display: block; }
 <body>
 
 <canvas id="game"></canvas>
+<canvas id="minimap-canvas" width="120" height="120"></canvas>
+<div id="crosshair"></div>
 
 <div id="ui-overlay">
   <div id="hud" style="display:none;">
@@ -103,6 +133,7 @@ canvas { display: block; }
     <div id="alive-count" style="margin-top:8px;"></div>
   </div>
   <div id="score-display" style="display:none;">SCORE: 0</div>
+  <div id="speed-display">0 MPH</div>
   <div id="message"></div>
 </div>
 
@@ -113,14 +144,15 @@ canvas { display: block; }
   <button id="start-btn">START</button>
   <div id="controls-hint">
     WASD / Arrow Keys to drive &bull; SPACE for boost<br>
-    Smash into enemies to destroy them. Last one standing wins!
+    Smash into enemies to destroy them. Last one standing wins!<br>
+    <em style="color:#fa0">&#x1F3AE; First Person 3D View</em>
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
 <script>
 // ============ VEHICLE / ANIMAL DEFINITIONS ============
 const ROSTER = [
-  // Vehicles
   { id:'monster_truck', name:'Monster Truck', icon:'🛻', type:'vehicle',
     hp:120, speed:3.2, mass:1.4, size:22, color:'#e22', turnSpeed:0.045,
     desc:'HP:★★★ SPD:★★ PWR:★★★' },
@@ -139,7 +171,6 @@ const ROSTER = [
   { id:'ambulance', name:'Ambulance', icon:'🚑', type:'vehicle',
     hp:110, speed:3.5, mass:1.2, size:21, color:'#fff', turnSpeed:0.04,
     desc:'HP:★★ SPD:★★ PWR:★★' },
-  // Powerful Animals
   { id:'trex', name:'T-Rex', icon:'🦖', type:'animal',
     hp:180, speed:3.0, mass:2.2, size:26, color:'#4a2', turnSpeed:0.035,
     desc:'HP:★★★ SPD:★★ PWR:★★★' },
@@ -161,9 +192,8 @@ const ROSTER = [
 ];
 
 // ============ GAME STATE ============
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-let W, H;
+const gameCanvas = document.getElementById('game');
+let W = window.innerWidth, H = window.innerHeight;
 
 const ARENA_RADIUS = 380;
 const ARENA_SHRINK_RATE = 0.03;
@@ -178,12 +208,398 @@ let keys = {};
 let shakeTimer = 0;
 let shakeIntensity = 0;
 
+// ============ THREE.JS GLOBALS ============
+let scene, camera, renderer;
+let arenaFloorMesh, arenaWallMesh, dangerRingMesh;
+const entityMeshes = new Map();
+let particleGeo, particlePositions, particleColors, particleSystem;
+const MAX_PARTICLES_3D = 800;
+
+// ============ RESIZE ============
 function resize() {
-  W = canvas.width = window.innerWidth;
-  H = canvas.height = window.innerHeight;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  if (renderer) {
+    renderer.setSize(W, H);
+    camera.aspect = W / H;
+    camera.updateProjectionMatrix();
+  }
 }
 window.addEventListener('resize', resize);
-resize();
+
+// ============ THREE.JS INIT ============
+function initThree() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x060300);
+  scene.fog = new THREE.FogExp2(0x060300, 0.0011);
+
+  camera = new THREE.PerspectiveCamera(75, W / H, 0.5, 1500);
+  camera.position.set(0, 14, -30);
+  camera.lookAt(0, 8, 100);
+
+  renderer = new THREE.WebGLRenderer({ canvas: gameCanvas, antialias: true });
+  renderer.setSize(W, H);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  // Lighting
+  scene.add(new THREE.AmbientLight(0xffd080, 0.45));
+
+  const sun = new THREE.DirectionalLight(0xfff0cc, 1.1);
+  sun.position.set(200, 400, 150);
+  sun.castShadow = true;
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -600;
+  sun.shadow.camera.right = sun.shadow.camera.top = 600;
+  sun.shadow.camera.far = 1200;
+  sun.shadow.mapSize.width = sun.shadow.mapSize.height = 2048;
+  scene.add(sun);
+
+  scene.add(new THREE.HemisphereLight(0x3050aa, 0x402000, 0.3));
+
+  // Outer dark ground
+  const outerGnd = new THREE.Mesh(
+    new THREE.PlaneGeometry(4000, 4000),
+    new THREE.MeshLambertMaterial({ color: 0x080503 })
+  );
+  outerGnd.rotation.x = -Math.PI / 2;
+  outerGnd.position.y = -0.5;
+  outerGnd.receiveShadow = true;
+  scene.add(outerGnd);
+
+  // Arena floor
+  arenaFloorMesh = new THREE.Mesh(
+    new THREE.CircleGeometry(ARENA_RADIUS, 80),
+    new THREE.MeshLambertMaterial({ color: 0x261708 })
+  );
+  arenaFloorMesh.rotation.x = -Math.PI / 2;
+  arenaFloorMesh.receiveShadow = true;
+  scene.add(arenaFloorMesh);
+
+  addFloorGrid();
+
+  // Arena perimeter wall
+  arenaWallMesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(ARENA_RADIUS, ARENA_RADIUS, 32, 80, 1, true),
+    new THREE.MeshLambertMaterial({ color: 0x4a2e10, side: THREE.DoubleSide })
+  );
+  arenaWallMesh.position.y = 16;
+  scene.add(arenaWallMesh);
+
+  // Danger glow ring
+  dangerRingMesh = new THREE.Mesh(
+    new THREE.TorusGeometry(ARENA_RADIUS, 4, 8, 80),
+    new THREE.MeshBasicMaterial({ color: 0xff2200 })
+  );
+  dangerRingMesh.rotation.x = Math.PI / 2;
+  dangerRingMesh.position.y = 32;
+  scene.add(dangerRingMesh);
+
+  initParticleSystem();
+}
+
+function addFloorGrid() {
+  const pts = [];
+  const step = 50;
+  for (let x = -ARENA_RADIUS; x <= ARENA_RADIUS; x += step) {
+    pts.push(x, 0.2, -ARENA_RADIUS, x, 0.2, ARENA_RADIUS);
+  }
+  for (let z = -ARENA_RADIUS; z <= ARENA_RADIUS; z += step) {
+    pts.push(-ARENA_RADIUS, 0.2, z, ARENA_RADIUS, 0.2, z);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  scene.add(new THREE.LineSegments(geo,
+    new THREE.LineBasicMaterial({ color: 0x3a2208, transparent: true, opacity: 0.55 })
+  ));
+}
+
+function initParticleSystem() {
+  particlePositions = new Float32Array(MAX_PARTICLES_3D * 3);
+  particleColors    = new Float32Array(MAX_PARTICLES_3D * 3);
+  for (let i = 0; i < MAX_PARTICLES_3D; i++) particlePositions[i * 3 + 1] = -9999;
+
+  particleGeo = new THREE.BufferGeometry();
+  particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+  particleGeo.setAttribute('color',    new THREE.BufferAttribute(particleColors,    3));
+
+  particleSystem = new THREE.Points(particleGeo,
+    new THREE.PointsMaterial({ size: 5, vertexColors: true, sizeAttenuation: true,
+                                transparent: true, opacity: 0.9, depthWrite: false })
+  );
+  scene.add(particleSystem);
+}
+
+// ============ 3D MODEL HELPERS ============
+function lmat(color, emissiveHex) {
+  const m = new THREE.MeshLambertMaterial({ color });
+  if (emissiveHex !== undefined) m.emissive.setHex(emissiveHex);
+  return m;
+}
+const BLACK  = lmat(0x111111);
+const CHROME = lmat(0x888888);
+const GLASS  = lmat(0x1a2d3a);
+const DARK   = lmat(0x222211);
+
+function addBox(group, mat, w, h, d, x, y, z, shadow=true) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z);
+  if (shadow) { m.castShadow = true; m.receiveShadow = true; }
+  group.add(m); return m;
+}
+function addCyl(group, mat, rt, rb, h, seg, x, y, z, rx=0, ry=0, rz=0, shadow=true) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg), mat);
+  m.position.set(x, y, z);
+  m.rotation.set(rx, ry, rz);
+  if (shadow) { m.castShadow = true; m.receiveShadow = true; }
+  group.add(m); return m;
+}
+function wheels4(group, wR, wW, y, fx, rx, sz) {
+  const geo = new THREE.CylinderGeometry(wR, wR, wW, 14);
+  const rGeo = new THREE.CylinderGeometry(wR * 0.5, wR * 0.5, wW + 0.5, 8);
+  for (const [wx, wz] of [[fx,sz],[fx,-sz],[rx,sz],[rx,-sz]]) {
+    const w = new THREE.Mesh(geo, BLACK); w.rotation.x = Math.PI / 2;
+    w.position.set(wx, y, wz); w.castShadow = true; group.add(w);
+    const r = new THREE.Mesh(rGeo, CHROME); r.rotation.x = Math.PI / 2;
+    r.position.set(wx, y, wz); group.add(r);
+  }
+}
+function addFlame(group, s) {
+  const fg = new THREE.Group(); fg.name = 'flame'; fg.visible = false;
+  const f1 = new THREE.Mesh(new THREE.ConeGeometry(s*0.28, s*0.9, 7),
+    new THREE.MeshBasicMaterial({ color: 0xff6600 }));
+  f1.rotation.z = Math.PI / 2; f1.position.set(-s*1.1, s*0.55, 0); fg.add(f1);
+  const f2 = new THREE.Mesh(new THREE.ConeGeometry(s*0.15, s*0.55, 6),
+    new THREE.MeshBasicMaterial({ color: 0xffee00 }));
+  f2.rotation.z = Math.PI / 2; f2.position.set(-s*1.2, s*0.55, 0); fg.add(f2);
+  group.add(fg);
+}
+
+// ============ VEHICLE BUILDERS ============
+function buildMonsterTruck(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  addBox(g, bm,     s*2.2, s*0.65, s*1.25, 0,      s*0.85, 0);
+  addBox(g, bm,     s*1.1, s*0.60, s*1.05, -s*0.3, s*1.62, 0);
+  addBox(g, GLASS,  s*0.08,s*0.48, s*0.88, s*0.25, s*1.62, 0, false);
+  addBox(g, CHROME, s*0.22,s*0.45, s*1.4,  s*1.22, s*0.68, 0);
+  // exhaust pipes
+  addCyl(g, CHROME, s*0.06,s*0.06, s*0.8, 8, -s*0.5, s*1.9, s*0.35, 0,0,0);
+  addCyl(g, CHROME, s*0.06,s*0.06, s*0.8, 8, -s*0.5, s*1.9,-s*0.35, 0,0,0);
+  wheels4(g, s*0.55, s*0.32, s*0.55, s*0.88, -s*0.88, s*0.80);
+  addFlame(g, s);
+  return g;
+}
+
+function buildSportsCar(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  addBox(g, bm,    s*2.4, s*0.38, s*1.15,  0,      s*0.34, 0);
+  addBox(g, bm,    s*1.25,s*0.38, s*0.95, -s*0.2,  s*0.72, 0);
+  addBox(g, GLASS, s*0.07,s*0.35, s*0.85,  s*0.44, s*0.72, 0, false);
+  addBox(g, bm,    s*0.14,s*0.1,  s*1.3,   s*1.25, s*0.11, 0); // front splitter
+  addBox(g, bm,    s*0.14,s*0.22, s*1.15, -s*1.15, s*0.5,  0); // rear diffuser
+  wheels4(g, s*0.30, s*0.20, s*0.30, s*0.90, -s*0.90, s*0.68);
+  addFlame(g, s);
+  return g;
+}
+
+function buildBus(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  addBox(g, bm,    s*2.85,s*0.88, s*1.25, 0,     s*0.7, 0);
+  addBox(g, GLASS, s*0.07,s*0.58, s*1.05, s*1.48,s*0.82,0, false);
+  // side windows
+  for (const wx of [-s*0.8, 0, s*0.8]) {
+    addBox(g, GLASS, s*0.56,s*0.32, s*0.07,  wx, s*0.82, s*0.67, false);
+    addBox(g, GLASS, s*0.56,s*0.32, s*0.07,  wx, s*0.82,-s*0.67, false);
+  }
+  addBox(g, lmat(0x333300), s*2.7,s*0.07,s*1.08, 0, s*1.62, 0); // roof rack
+  wheels4(g, s*0.30, s*0.24, s*0.30, s*1.05, -s*1.05, s*0.78);
+  addFlame(g, s);
+  return g;
+}
+
+function buildPickup(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  addBox(g, bm,    s*1.45,s*0.48, s*1.18, -s*0.6, s*0.49, 0); // bed
+  addBox(g, bm,    s*1.1, s*0.68, s*1.18,  s*0.52,s*0.68, 0); // cab
+  addBox(g, GLASS, s*0.07,s*0.48, s*0.98,  s*1.12,s*0.74, 0, false);
+  addBox(g, CHROME,s*0.2, s*0.32, s*1.28,  s*1.2, s*0.32, 0); // bumper
+  wheels4(g, s*0.38, s*0.26, s*0.38, s*0.82, -s*0.82, s*0.76);
+  addFlame(g, s);
+  return g;
+}
+
+function buildTank(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  addBox(g, bm,   s*2.3, s*0.58, s*1.38, 0,      s*0.55, 0); // hull
+  addBox(g, bm,   s*0.9, s*0.42, s*0.88, s*0.1,  s*1.06, 0); // turret
+  // barrel
+  addCyl(g, lmat(0x555544), s*0.1,s*0.12, s*1.55, 10, s*0.95,s*1.18, 0, 0,0,Math.PI/2);
+  // tracks
+  for (const tz of [s*0.88, -s*0.88]) {
+    addBox(g, DARK, s*2.18,s*0.32, s*0.28, 0, s*0.28, tz);
+    for (let tx = -s*0.8; tx <= s*0.8; tx += s*0.5)
+      addCyl(g, DARK, s*0.19,s*0.19, s*0.32, 7, tx, s*0.18, tz, Math.PI/2,0,0);
+  }
+  addFlame(g, s);
+  return g;
+}
+
+function buildAmbulance(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const wm = lmat(0xdddddd);
+  const rm = lmat(0xcc0000);
+  addBox(g, wm,    s*2.3, s*0.95, s*1.18, 0,      s*0.78, 0);
+  addBox(g, GLASS, s*0.07,s*0.58, s*0.96, s*1.2,  s*0.84, 0, false);
+  // red cross
+  addBox(g, rm, s*0.07,s*0.48,s*0.13,  0, s*0.84,  s*0.63, false);
+  addBox(g, rm, s*0.07,s*0.13,s*0.48,  0, s*0.84,  s*0.63, false);
+  addBox(g, rm, s*0.07,s*0.48,s*0.13,  0, s*0.84, -s*0.63, false);
+  addBox(g, rm, s*0.07,s*0.13,s*0.48,  0, s*0.84, -s*0.63, false);
+  // roof light bar
+  const lbm = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+  addBox(g, lbm, s*0.65,s*0.18,s*0.18, s*0.45, s*1.3, 0, false);
+  wheels4(g, s*0.30, s*0.22, s*0.30, s*0.88, -s*0.88, s*0.74);
+  addFlame(g, s);
+  return g;
+}
+
+// ============ ANIMAL BUILDERS ============
+function buildTRex(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  const dm = lmat(new THREE.Color(def.color).multiplyScalar(0.55));
+  addBox(g, bm, s*1.8, s*0.88, s*0.98, 0,     s*0.98, 0); // body
+  addBox(g, bm, s*0.78,s*0.58, s*0.68, s*1.2, s*1.42, 0); // head
+  addBox(g, dm, s*0.65,s*0.19, s*0.50, s*1.2, s*1.02, 0); // jaw
+  addBox(g, bm, s*0.28,s*0.18, s*0.15, s*0.6, s*1.08, s*0.3); // arm L
+  addBox(g, bm, s*0.28,s*0.18, s*0.15, s*0.6, s*1.08,-s*0.3); // arm R
+  addBox(g, bm, s*0.98,s*0.32, s*0.42,-s*1.1, s*0.88, 0); // tail
+  addCyl(g, dm, s*0.22,s*0.18, s*0.88, 8,  -s*0.2, s*0.52,  s*0.35, 0,0,0);
+  addCyl(g, dm, s*0.22,s*0.18, s*0.88, 8,  -s*0.2, s*0.52, -s*0.35, 0,0,0);
+  addFlame(g, s);
+  return g;
+}
+
+function buildTriceratops(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  const dm = lmat(new THREE.Color(def.color).multiplyScalar(0.55));
+  const hm = lmat(0xeecc88);
+  addBox(g, bm, s*2.0, s*0.88, s*1.28,  0,     s*0.9,  0); // body
+  addBox(g, bm, s*0.68,s*0.78, s*1.08,  s*1.2, s*1.02, 0); // head/frill
+  addBox(g, dm, s*0.42,s*0.32, s*0.48,  s*1.6, s*0.82, 0); // beak
+  // three horns
+  addCyl(g, hm, s*0.06,s*0.1, s*0.7, 8, s*1.3, s*1.55,  s*0.25, 0,0,-0.3);
+  addCyl(g, hm, s*0.06,s*0.1, s*0.7, 8, s*1.3, s*1.55, -s*0.25, 0,0,-0.3);
+  addCyl(g, hm, s*0.07,s*0.12,s*0.65,8, s*1.58,s*1.4,   0,      0,0,-0.35);
+  for (const [lx,lz] of [[s*0.7,s*0.5],[s*0.7,-s*0.5],[-s*0.7,s*0.5],[-s*0.7,-s*0.5]])
+    addCyl(g, dm, s*0.22,s*0.18, s*0.85, 8, lx, s*0.42, lz, 0,0,0);
+  addFlame(g, s);
+  return g;
+}
+
+function buildMammoth(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  const dm = lmat(new THREE.Color(def.color).multiplyScalar(0.50));
+  const tm = lmat(0xeeccaa);
+  addBox(g, bm, s*2.0, s*1.18, s*1.38, 0,      s*1.08, 0); // body
+  addBox(g, bm, s*0.68,s*0.78, s*0.88, s*1.15, s*1.52, 0); // head
+  addBox(g, bm, s*0.20,s*0.68, s*0.20, s*1.42, s*0.98, 0); // trunk
+  // hump
+  const hump = new THREE.Mesh(new THREE.SphereGeometry(s*0.58,8,8), bm);
+  hump.scale.set(1,0.65,1); hump.position.set(-s*0.38, s*1.9, 0);
+  hump.castShadow=true; g.add(hump);
+  // tusks
+  addCyl(g, tm, s*0.07,s*0.04, s*0.9, 8, s*1.5, s*1.38,  s*0.25, 0,0, Math.PI/2-0.3);
+  addCyl(g, tm, s*0.07,s*0.04, s*0.9, 8, s*1.5, s*1.38, -s*0.25, 0,0, Math.PI/2-0.3);
+  for (const [lx,lz] of [[s*0.7,s*0.55],[s*0.7,-s*0.55],[-s*0.7,s*0.55],[-s*0.7,-s*0.55]])
+    addCyl(g, dm, s*0.27,s*0.22, s*1.0, 8, lx, s*0.5, lz, 0,0,0);
+  addFlame(g, s);
+  return g;
+}
+
+function buildRhino(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  const dm = lmat(new THREE.Color(def.color).multiplyScalar(0.55));
+  addBox(g, bm, s*2.0, s*0.82, s*1.08,  0,     s*0.84, 0);
+  addBox(g, bm, s*0.68,s*0.62, s*0.82,  s*1.2, s*0.88, 0);
+  addCyl(g, lmat(0xbbaa88), s*0.06,s*0.14, s*0.56, 8, s*1.56,s*1.16,0, 0,0,-(Math.PI/2-0.4));
+  for (const [lx,lz] of [[s*0.7,s*0.4],[s*0.7,-s*0.4],[-s*0.7,s*0.4],[-s*0.7,-s*0.4]])
+    addCyl(g, dm, s*0.20,s*0.16, s*0.82, 8, lx, s*0.41, lz, 0,0,0);
+  addFlame(g, s);
+  return g;
+}
+
+function buildGorilla(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  const dm = lmat(new THREE.Color(def.color).multiplyScalar(0.50));
+  const fm = lmat(0x1a1a1a);
+  addBox(g, bm, s*1.48,s*1.08, s*1.08,  0,      s*0.92, 0); // torso
+  addBox(g, bm, s*0.68,s*0.68, s*0.68,  s*0.88, s*1.65, 0); // head
+  addBox(g, fm, s*0.07,s*0.38, s*0.42,  s*1.25, s*1.56, 0, false); // face
+  // knuckle-walking arms
+  for (const az of [s*0.68, -s*0.68]) {
+    addBox(g, dm, s*0.26,s*0.26, s*0.95, s*0.5, s*0.6, az);
+    const fist = new THREE.Mesh(new THREE.SphereGeometry(s*0.2,7,7), dm);
+    fist.position.set(s*0.5, s*0.24, az); fist.castShadow=true; g.add(fist);
+  }
+  addCyl(g, dm, s*0.22,s*0.18, s*0.7, 8, -s*0.38, s*0.35,  s*0.3, 0,0,0);
+  addCyl(g, dm, s*0.22,s*0.18, s*0.7, 8, -s*0.38, s*0.35, -s*0.3, 0,0,0);
+  addFlame(g, s);
+  return g;
+}
+
+function buildBull(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  const dm = lmat(new THREE.Color(def.color).multiplyScalar(0.55));
+  const hm = lmat(0xeecc88);
+  addBox(g, bm, s*1.88,s*0.78, s*0.98,  0,     s*0.84, 0); // body
+  addBox(g, bm, s*0.62,s*0.58, s*0.62,  s*1.1, s*0.94, 0); // head
+  addBox(g, dm, s*0.28,s*0.28, s*0.42,  s*1.4, s*0.8,  0); // snout
+  addBox(g, bm, s*0.68,s*0.32, s*0.68, -s*0.2, s*1.38, 0); // hump
+  addCyl(g, hm, s*0.05,s*0.08, s*0.5, 8, s*1.1,s*1.28, s*0.28, 0,0.3,-0.4);
+  addCyl(g, hm, s*0.05,s*0.08, s*0.5, 8, s*1.1,s*1.28,-s*0.28, 0,-0.3,-0.4);
+  for (const [lx,lz] of [[s*0.7,s*0.4],[s*0.7,-s*0.4],[-s*0.7,s*0.4],[-s*0.7,-s*0.4]])
+    addCyl(g, dm, s*0.18,s*0.15, s*0.8, 8, lx, s*0.4, lz, 0,0,0);
+  addFlame(g, s);
+  return g;
+}
+
+function buildDefault(def) {
+  const g = new THREE.Group(); const s = def.size * 0.85;
+  const bm = lmat(new THREE.Color(def.color));
+  addBox(g, bm, s*2.0, s*0.68, s*1.18, 0, s*0.54, 0);
+  wheels4(g, s*0.34, s*0.22, s*0.34, s*0.85, -s*0.85, s*0.72);
+  addFlame(g, s);
+  return g;
+}
+
+function createEntityMesh(def) {
+  switch (def.id) {
+    case 'monster_truck': return buildMonsterTruck(def);
+    case 'sports_car':    return buildSportsCar(def);
+    case 'bus':           return buildBus(def);
+    case 'pickup':        return buildPickup(def);
+    case 'tank':          return buildTank(def);
+    case 'ambulance':     return buildAmbulance(def);
+    case 'trex':          return buildTRex(def);
+    case 'triceratops':   return buildTriceratops(def);
+    case 'mammoth':       return buildMammoth(def);
+    case 'rhino':         return buildRhino(def);
+    case 'gorilla':       return buildGorilla(def);
+    case 'bull':          return buildBull(def);
+    default:              return buildDefault(def);
+  }
+}
 
 // ============ MENU SETUP ============
 const selectDiv = document.getElementById('vehicle-select');
@@ -198,12 +614,11 @@ ROSTER.forEach(r => {
   };
   selectDiv.appendChild(btn);
 });
-
 document.getElementById('start-btn').onclick = startGame;
 
 // ============ INPUT ============
-window.addEventListener('keydown', e => { keys[e.code] = true; if(e.code==='Space') e.preventDefault(); });
-window.addEventListener('keyup', e => { keys[e.code] = false; });
+window.addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'Space') e.preventDefault(); });
+window.addEventListener('keyup',   e => { keys[e.code] = false; });
 
 // ============ ENTITY ============
 function createEntity(def, x, y, angle, isPlayer) {
@@ -228,6 +643,9 @@ function startGame() {
   document.getElementById('hud').style.display = 'block';
   document.getElementById('score-display').style.display = 'block';
   document.getElementById('message').style.display = 'none';
+  document.getElementById('crosshair').style.display = 'block';
+  document.getElementById('minimap-canvas').style.display = 'block';
+  document.getElementById('speed-display').style.display = 'block';
 
   arenaRadius = ARENA_RADIUS;
   entities = [];
@@ -235,11 +653,14 @@ function startGame() {
   score = 0;
   gameRunning = true;
 
+  // Clean up old meshes
+  for (const [, mesh] of entityMeshes) scene.remove(mesh);
+  entityMeshes.clear();
+
   const pDef = ROSTER.find(r => r.id === selectedId);
   player = createEntity(pDef, 0, 0, 0, true);
   entities.push(player);
 
-  // Spawn 11 AI opponents from random roster picks
   const enemyCount = 11;
   for (let i = 0; i < enemyCount; i++) {
     const angle = (Math.PI * 2 * i) / enemyCount;
@@ -248,6 +669,20 @@ function startGame() {
     const e = createEntity(def, Math.cos(angle) * dist, Math.sin(angle) * dist, angle + Math.PI, false);
     entities.push(e);
   }
+
+  // Create 3D meshes for every entity
+  for (const e of entities) {
+    const def = ROSTER.find(r => r.id === e.id);
+    const mesh = createEntityMesh(def);
+    scene.add(mesh);
+    entityMeshes.set(e, mesh);
+  }
+
+  // Update arena to full size
+  const scale = arenaRadius / ARENA_RADIUS;
+  arenaFloorMesh.scale.set(scale, 1, scale);
+  arenaWallMesh.scale.set(scale, 1, scale);
+  dangerRingMesh.scale.set(scale, 1, scale);
 }
 
 // ============ PARTICLES ============
@@ -255,10 +690,11 @@ function spawnParticles(x, y, color, count, speed) {
   for (let i = 0; i < count; i++) {
     const a = Math.random() * Math.PI * 2;
     const s = Math.random() * speed;
+    const ml = 0.5 + Math.random() * 0.5;
     particles.push({
       x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s,
-      life: 0.5 + Math.random()*0.5, maxLife: 0.5 + Math.random()*0.5,
-      size: 2 + Math.random()*4, color
+      life: ml, maxLife: ml,
+      size: 2 + Math.random() * 4, color
     });
   }
 }
@@ -267,18 +703,15 @@ function spawnExplosion(x, y) {
   spawnParticles(x, y, '#f80', 30, 6);
   spawnParticles(x, y, '#ff0', 20, 4);
   spawnParticles(x, y, '#f00', 15, 5);
-  shakeTimer = 0.3;
-  shakeIntensity = 8;
+  shakeTimer = 0.3; shakeIntensity = 8;
 }
 
 // ============ AI ============
 function updateAI(e, dt) {
   if (e.stunTimer > 0) return;
   e.aiTimer -= dt;
-
   if (e.aiTimer <= 0) {
     e.aiTimer = 0.5 + Math.random() * 1.0;
-    // Pick closest alive target
     let closest = null, closestD = Infinity;
     for (const other of entities) {
       if (other === e || !other.alive) continue;
@@ -288,34 +721,22 @@ function updateAI(e, dt) {
     e.aiTarget = closest;
     e.aiState = closestD < 120 ? 'charge' : 'roam';
   }
-
   let targetAngle;
   if (e.aiTarget && e.aiTarget.alive) {
     targetAngle = Math.atan2(e.aiTarget.y - e.y, e.aiTarget.x - e.x);
   } else {
-    targetAngle = Math.atan2(-e.y, -e.x); // go toward center
+    targetAngle = Math.atan2(-e.y, -e.x);
   }
-
-  // Steer toward target
   let diff = targetAngle - e.angle;
-  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff >  Math.PI) diff -= Math.PI * 2;
   while (diff < -Math.PI) diff += Math.PI * 2;
   e.angle += Math.sign(diff) * Math.min(Math.abs(diff), e.turnSpeed * 60 * dt);
-
-  // Accelerate
   const spd = e.speed * (e.aiState === 'charge' ? 1.2 : 0.8);
   e.vx += Math.cos(e.angle) * spd * dt * 60 * 0.08;
   e.vy += Math.sin(e.angle) * spd * dt * 60 * 0.08;
-
-  // Boost occasionally when charging
   if (e.aiState === 'charge' && e.boost > 40 && Math.random() < 0.02) {
-    e.isBoosting = true;
-    e.boost -= 30;
-  } else {
-    e.isBoosting = false;
-  }
-
-  // Avoid arena edge
+    e.isBoosting = true; e.boost -= 30;
+  } else { e.isBoosting = false; }
   const distFromCenter = Math.hypot(e.x, e.y);
   if (distFromCenter > arenaRadius * 0.75) {
     const inward = Math.atan2(-e.y, -e.x);
@@ -332,12 +753,10 @@ function handleCollisions() {
     for (let j = i + 1; j < entities.length; j++) {
       const b = entities[j];
       if (!b.alive) continue;
-
       const dx = b.x - a.x, dy = b.y - a.y;
       const dist = Math.hypot(dx, dy);
       const minDist = a.size + b.size;
       if (dist < minDist && dist > 0) {
-        // Separate
         const nx = dx / dist, ny = dy / dist;
         const overlap = minDist - dist;
         const totalMass = a.mass + b.mass;
@@ -345,45 +764,25 @@ function handleCollisions() {
         a.y -= ny * overlap * (b.mass / totalMass);
         b.x += nx * overlap * (a.mass / totalMass);
         b.y += ny * overlap * (a.mass / totalMass);
-
-        // Impact force based on relative velocity
         const relVx = a.vx - b.vx, relVy = a.vy - b.vy;
         const impactSpeed = Math.abs(relVx * nx + relVy * ny);
-
         if (impactSpeed > 1.5) {
-          // Damage
           const baseDmg = impactSpeed * 3;
-          const dmgToB = baseDmg * (a.mass / b.mass) * (a.isBoosting ? 1.8 : 1);
-          const dmgToA = baseDmg * (b.mass / a.mass) * (b.isBoosting ? 1.8 : 1);
-
-          b.hp -= dmgToB;
-          a.hp -= dmgToA;
+          b.hp -= baseDmg * (a.mass / b.mass) * (a.isBoosting ? 1.8 : 1);
+          a.hp -= baseDmg * (b.mass / a.mass) * (b.isBoosting ? 1.8 : 1);
           b.stunTimer = Math.min(impactSpeed * 0.05, 0.3);
           a.stunTimer = Math.min(impactSpeed * 0.05, 0.3);
-
-          // Knockback
           const kb = impactSpeed * 0.5;
           a.knockbackX -= nx * kb * (b.mass / a.mass);
           a.knockbackY -= ny * kb * (b.mass / a.mass);
           b.knockbackX += nx * kb * (a.mass / b.mass);
           b.knockbackY += ny * kb * (a.mass / b.mass);
-
-          // Particles at collision point
-          const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
-          spawnParticles(cx, cy, '#ff0', 6, 3);
-          spawnParticles(cx, cy, '#fa0', 4, 2);
-
-          if (impactSpeed > 4) {
-            shakeTimer = 0.15;
-            shakeIntensity = 4;
-          }
-
-          // Track score for player kills
+          spawnParticles((a.x+b.x)/2, (a.y+b.y)/2, '#ff0', 6, 3);
+          spawnParticles((a.x+b.x)/2, (a.y+b.y)/2, '#fa0', 4, 2);
+          if (impactSpeed > 4) { shakeTimer = 0.15; shakeIntensity = 4; }
           if (b.hp <= 0 && a.isPlayer) score += 100;
-          if (a.hp <= 0 && b.isPlayer) score += 25; // partial points
+          if (a.hp <= 0 && b.isPlayer) score += 25;
         }
-
-        // Elastic bounce
         const bounce = 0.6;
         const dvn = relVx * nx + relVy * ny;
         a.vx -= dvn * nx * bounce * (b.mass / totalMass);
@@ -398,91 +797,52 @@ function handleCollisions() {
 // ============ UPDATE ============
 function update(dt) {
   if (!gameRunning) return;
-
-  // Shrink arena
   if (arenaRadius > 150) arenaRadius -= ARENA_SHRINK_RATE * dt * 60;
 
-  // Player input
   if (player && player.alive && player.stunTimer <= 0) {
-    const left = keys['ArrowLeft'] || keys['KeyA'];
+    const left  = keys['ArrowLeft']  || keys['KeyA'];
     const right = keys['ArrowRight'] || keys['KeyD'];
-    const up = keys['ArrowUp'] || keys['KeyW'];
-    const down = keys['ArrowDown'] || keys['KeyS'];
+    const up    = keys['ArrowUp']    || keys['KeyW'];
+    const down  = keys['ArrowDown']  || keys['KeyS'];
     const boost = keys['Space'];
-
-    if (left) player.angle -= player.turnSpeed * dt * 60;
+    if (left)  player.angle -= player.turnSpeed * dt * 60;
     if (right) player.angle += player.turnSpeed * dt * 60;
-
     let accel = 0;
-    if (up) accel = player.speed;
+    if (up)   accel =  player.speed;
     if (down) accel = -player.speed * 0.5;
-
     player.isBoosting = false;
     if (boost && player.boost > 0 && up) {
-      accel *= 1.8;
-      player.boost -= dt * 60;
-      player.isBoosting = true;
+      accel *= 1.8; player.boost -= dt * 60; player.isBoosting = true;
     }
-
     player.vx += Math.cos(player.angle) * accel * dt * 60 * 0.08;
     player.vy += Math.sin(player.angle) * accel * dt * 60 * 0.08;
   }
 
-  // Boost regeneration
   for (const e of entities) {
-    if (e.alive && !e.isBoosting && e.boost < 100) {
-      e.boost = Math.min(100, e.boost + dt * 15);
-    }
+    if (e.alive && !e.isBoosting && e.boost < 100) e.boost = Math.min(100, e.boost + dt * 15);
   }
-
-  // AI
   for (const e of entities) {
     if (!e.isPlayer && e.alive) updateAI(e, dt);
   }
 
-  // Physics
   for (const e of entities) {
     if (!e.alive) continue;
-
     e.stunTimer = Math.max(0, e.stunTimer - dt);
-
-    // Apply knockback
-    e.vx += e.knockbackX;
-    e.vy += e.knockbackY;
-    e.knockbackX *= 0.8;
-    e.knockbackY *= 0.8;
-
-    // Move
-    e.x += e.vx;
-    e.y += e.vy;
-
-    // Friction
-    e.vx *= 0.96;
-    e.vy *= 0.96;
-
-    // Arena boundary
+    e.vx += e.knockbackX; e.vy += e.knockbackY;
+    e.knockbackX *= 0.8;  e.knockbackY *= 0.8;
+    e.x += e.vx; e.y += e.vy;
+    e.vx *= 0.96; e.vy *= 0.96;
     const distFromCenter = Math.hypot(e.x, e.y);
     if (distFromCenter > arenaRadius - e.size) {
       const nx = e.x / distFromCenter, ny = e.y / distFromCenter;
       const targetDist = arenaRadius - e.size;
-      e.x = nx * targetDist;
-      e.y = ny * targetDist;
-      // Bounce inward
+      e.x = nx * targetDist; e.y = ny * targetDist;
       const dot = e.vx * nx + e.vy * ny;
-      e.vx -= 1.5 * dot * nx;
-      e.vy -= 1.5 * dot * ny;
-      // Arena edge damage
+      e.vx -= 1.5 * dot * nx; e.vy -= 1.5 * dot * ny;
       e.hp -= dt * 20;
       spawnParticles(e.x + nx * e.size, e.y + ny * e.size, '#f44', 2, 2);
     }
-
-    // Trail
-    if (Math.hypot(e.vx, e.vy) > 1.5) {
-      e.trail.push({ x: e.x, y: e.y, life: 0.3 });
-    }
     e.trail = e.trail.filter(t => { t.life -= dt; return t.life > 0; });
-
-    // Death
     if (e.hp <= 0 && e.alive) {
       e.alive = false;
       spawnExplosion(e.x, e.y);
@@ -492,28 +852,21 @@ function update(dt) {
 
   handleCollisions();
 
-  // Particles
   for (const p of particles) {
-    p.x += p.vx;
-    p.y += p.vy;
-    p.vx *= 0.95;
-    p.vy *= 0.95;
+    p.x += p.vx; p.y += p.vy;
+    p.vx *= 0.95; p.vy *= 0.95;
     p.life -= dt;
   }
   particles = particles.filter(p => p.life > 0);
 
-  // Shake
   if (shakeTimer > 0) shakeTimer -= dt;
 
-  // Check win/lose
   const aliveEnemies = entities.filter(e => !e.isPlayer && e.alive).length;
   if (player && !player.alive) {
     endGame(false, aliveEnemies);
   } else if (aliveEnemies === 0 && player && player.alive) {
     endGame(true, 0);
   }
-
-  // Update HUD
   updateHUD(aliveEnemies);
 }
 
@@ -523,11 +876,11 @@ function updateHUD(aliveEnemies) {
   const hpBar = document.getElementById('health-bar');
   hpBar.style.width = hpPct + '%';
   hpBar.style.backgroundColor = hpPct > 50 ? '#0f0' : hpPct > 25 ? '#fa0' : '#f00';
-
   document.getElementById('boost-bar').style.width = player.boost + '%';
   document.getElementById('score-display').textContent = 'SCORE: ' + score;
-  document.getElementById('alive-count').textContent =
-    'Opponents: ' + (aliveEnemies) + ' / 11';
+  document.getElementById('alive-count').textContent = 'Opponents: ' + aliveEnemies + ' / 11';
+  const spd = Math.round(Math.hypot(player.vx, player.vy) * 18);
+  document.getElementById('speed-display').textContent = spd + ' MPH';
 }
 
 function endGame(won, remaining) {
@@ -546,203 +899,148 @@ function endGame(won, remaining) {
     document.getElementById('menu').style.display = 'flex';
     document.getElementById('hud').style.display = 'none';
     document.getElementById('score-display').style.display = 'none';
+    document.getElementById('crosshair').style.display = 'none';
+    document.getElementById('minimap-canvas').style.display = 'none';
+    document.getElementById('speed-display').style.display = 'none';
   };
 }
 
-// ============ DRAW ============
+// ============ DRAW (Three.js) ============
+// Reusable colour for stun flash
+const _stunColor = new THREE.Color();
+
 function draw() {
-  ctx.fillStyle = '#1a1a1a';
-  ctx.fillRect(0, 0, W, H);
+  if (!renderer) return;
 
-  ctx.save();
+  // Scale arena meshes to match shrinking radius
+  const scale = arenaRadius / ARENA_RADIUS;
+  arenaFloorMesh.scale.set(scale, 1, scale);
+  arenaWallMesh.scale.set(scale, 1, scale);
+  dangerRingMesh.scale.set(scale, 1, scale);
 
-  // Camera follows player
-  let camX = 0, camY = 0;
-  if (player) { camX = player.x; camY = player.y; }
-
-  // Screen shake
-  let sx = 0, sy = 0;
-  if (shakeTimer > 0) {
-    sx = (Math.random() - 0.5) * shakeIntensity * 2;
-    sy = (Math.random() - 0.5) * shakeIntensity * 2;
-  }
-
-  ctx.translate(W/2 + sx - camX, H/2 + sy - camY);
-
-  // Arena floor
-  ctx.beginPath();
-  ctx.arc(0, 0, arenaRadius, 0, Math.PI * 2);
-  ctx.fillStyle = '#2a2215';
-  ctx.fill();
-
-  // Arena grid
-  ctx.strokeStyle = '#3a3225';
-  ctx.lineWidth = 1;
-  const gridSize = 50;
-  for (let x = -arenaRadius; x <= arenaRadius; x += gridSize) {
-    ctx.beginPath(); ctx.moveTo(x, -arenaRadius); ctx.lineTo(x, arenaRadius); ctx.stroke();
-  }
-  for (let y = -arenaRadius; y <= arenaRadius; y += gridSize) {
-    ctx.beginPath(); ctx.moveTo(-arenaRadius, y); ctx.lineTo(arenaRadius, y); ctx.stroke();
-  }
-
-  // Arena border - danger zone
-  ctx.beginPath();
-  ctx.arc(0, 0, arenaRadius, 0, Math.PI * 2);
-  ctx.strokeStyle = '#f00';
-  ctx.lineWidth = 4;
-  ctx.setLineDash([10, 10]);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Danger ring glow
-  ctx.beginPath();
-  ctx.arc(0, 0, arenaRadius, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(255,0,0,0.15)';
-  ctx.lineWidth = 20;
-  ctx.stroke();
-
-  // Trails
+  // Update entity 3D meshes
   for (const e of entities) {
-    for (const t of e.trail) {
-      const alpha = t.life / 0.3 * 0.3;
-      ctx.beginPath();
-      ctx.arc(t.x, t.y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(255,150,0,${alpha})`;
-      ctx.fill();
-    }
+    const mesh = entityMeshes.get(e);
+    if (!mesh) continue;
+
+    if (!e.alive) { mesh.visible = false; continue; }
+
+    // Hide player mesh in first-person (camera is inside it)
+    mesh.visible = !e.isPlayer;
+    mesh.position.set(e.x, 0, e.y);
+    mesh.rotation.y = -e.angle;
+
+    // Boost flame child
+    const flame = mesh.getObjectByName('flame');
+    if (flame) flame.visible = e.isBoosting;
+
+    // Stun flash: orange emissive glow
+    mesh.traverse(child => {
+      if (!child.isMesh) return;
+      if (e.stunTimer > 0) {
+        child.material.emissive = child.material.emissive || new THREE.Color();
+        child.material.emissive.setRGB(0.4, 0.25, 0);
+      } else if (child.material.emissive) {
+        child.material.emissive.setRGB(0, 0, 0);
+      }
+    });
   }
+
+  // ---- First-person camera ----
+  if (player && player.alive) {
+    const cos = Math.cos(player.angle);
+    const sin = Math.sin(player.angle);
+    const eyeH = 14;
+    const camBack = 5; // slight setback inside cabin
+
+    let sx = 0, sy = 0;
+    if (shakeTimer > 0) {
+      sx = (Math.random() - 0.5) * shakeIntensity * 0.28;
+      sy = (Math.random() - 0.5) * shakeIntensity * 0.14;
+    }
+
+    camera.position.set(
+      player.x - cos * camBack + sx,
+      eyeH + sy,
+      player.y - sin * camBack
+    );
+    camera.lookAt(
+      player.x + cos * 500,
+      eyeH * 0.55,
+      player.y + sin * 500
+    );
+  }
+
+  // ---- 3D particle buffer ----
+  let idx = 0;
+  for (const p of particles) {
+    if (idx >= MAX_PARTICLES_3D) break;
+    const alpha = p.life / p.maxLife;
+    const c = new THREE.Color(p.color);
+    particlePositions[idx*3]   = p.x;
+    particlePositions[idx*3+1] = 4 + alpha * (3 + Math.random() * 6);
+    particlePositions[idx*3+2] = p.y;
+    particleColors[idx*3]   = c.r * alpha;
+    particleColors[idx*3+1] = c.g * alpha;
+    particleColors[idx*3+2] = c.b * alpha;
+    idx++;
+  }
+  for (let i = idx; i < MAX_PARTICLES_3D; i++) particlePositions[i*3+1] = -9999;
+  particleGeo.attributes.position.needsUpdate = true;
+  particleGeo.attributes.color.needsUpdate    = true;
+
+  renderer.render(scene, camera);
+
+  // Draw 2D minimap on overlay canvas
+  drawMinimap();
+}
+
+// ============ MINIMAP (2D overlay canvas) ============
+function drawMinimap() {
+  const mmCanvas = document.getElementById('minimap-canvas');
+  const mc = mmCanvas.getContext('2d');
+  const sz = 120, cx = 60, cy = 60;
+  const scl = (sz / 2 - 6) / arenaRadius;
+
+  mc.clearRect(0, 0, sz, sz);
+
+  // Background circle
+  mc.beginPath(); mc.arc(cx, cy, sz/2, 0, Math.PI*2);
+  mc.fillStyle = 'rgba(0,0,0,0.72)'; mc.fill();
+
+  // Clip to circle
+  mc.save();
+  mc.beginPath(); mc.arc(cx, cy, sz/2 - 2, 0, Math.PI*2); mc.clip();
+
+  // Arena edge ring
+  mc.beginPath(); mc.arc(cx, cy, arenaRadius * scl, 0, Math.PI*2);
+  mc.strokeStyle = 'rgba(255,40,0,0.6)'; mc.lineWidth = 1.5; mc.stroke();
 
   // Entities
   for (const e of entities) {
     if (!e.alive) continue;
-    ctx.save();
-    ctx.translate(e.x, e.y);
-    ctx.rotate(e.angle);
-
-    // Body shape
-    ctx.beginPath();
-    if (e.type === 'vehicle') {
-      // Rectangular body for vehicles
-      ctx.fillStyle = e.color;
-      ctx.fillRect(-e.size, -e.size * 0.6, e.size * 2, e.size * 1.2);
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(-e.size, -e.size * 0.6, e.size * 2, e.size * 1.2);
-      // Front bumper
-      ctx.fillStyle = '#888';
-      ctx.fillRect(e.size * 0.8, -e.size * 0.7, e.size * 0.3, e.size * 1.4);
-    } else {
-      // Rounded body for animals
-      ctx.beginPath();
-      ctx.ellipse(0, 0, e.size, e.size * 0.7, 0, 0, Math.PI * 2);
-      ctx.fillStyle = e.color;
-      ctx.fill();
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      // Head
-      ctx.beginPath();
-      ctx.arc(e.size * 0.7, 0, e.size * 0.4, 0, Math.PI * 2);
-      ctx.fillStyle = e.color;
-      ctx.fill();
-      ctx.stroke();
-    }
-
-    // Boost flame
-    if (e.isBoosting) {
-      ctx.fillStyle = '#f80';
-      ctx.beginPath();
-      ctx.moveTo(-e.size, -e.size * 0.3);
-      ctx.lineTo(-e.size - 10 - Math.random() * 10, 0);
-      ctx.lineTo(-e.size, e.size * 0.3);
-      ctx.fill();
-      ctx.fillStyle = '#ff0';
-      ctx.beginPath();
-      ctx.moveTo(-e.size, -e.size * 0.15);
-      ctx.lineTo(-e.size - 5 - Math.random() * 8, 0);
-      ctx.lineTo(-e.size, e.size * 0.15);
-      ctx.fill();
-    }
-
-    // Stun indicator
-    if (e.stunTimer > 0) {
-      ctx.fillStyle = 'rgba(255,255,0,0.3)';
-      ctx.beginPath();
-      ctx.arc(0, 0, e.size + 5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    ctx.restore();
-
-    // Icon and name above
-    ctx.font = `${e.size}px serif`;
-    ctx.textAlign = 'center';
-    ctx.fillText(e.icon, e.x, e.y - e.size - 8);
-
-    // Health bar above entity
-    if (e.hp < e.maxHp) {
-      const barW = e.size * 2;
-      const barH = 4;
-      const barY = e.y - e.size - 22;
-      ctx.fillStyle = '#400';
-      ctx.fillRect(e.x - barW/2, barY, barW, barH);
-      ctx.fillStyle = e.hp > e.maxHp * 0.5 ? '#0f0' : e.hp > e.maxHp * 0.25 ? '#fa0' : '#f00';
-      ctx.fillRect(e.x - barW/2, barY, barW * (e.hp / e.maxHp), barH);
-    }
-
-    // Player indicator
+    const ex = cx + e.x * scl;
+    const ey = cy + e.y * scl;
     if (e.isPlayer) {
-      ctx.strokeStyle = '#0ff';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.arc(e.x, e.y, e.size + 8, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
+      // Directional triangle
+      mc.save();
+      mc.translate(ex, ey);
+      mc.rotate(e.angle - Math.PI / 2);
+      mc.beginPath();
+      mc.moveTo(0, -6); mc.lineTo(-3.5, 5); mc.lineTo(3.5, 5);
+      mc.closePath();
+      mc.fillStyle = '#00ffff'; mc.fill();
+      mc.restore();
+    } else {
+      mc.beginPath(); mc.arc(ex, ey, 2.8, 0, Math.PI*2);
+      mc.fillStyle = '#ff4444'; mc.fill();
     }
   }
+  mc.restore();
 
-  // Particles
-  for (const p of particles) {
-    const alpha = p.life / p.maxLife;
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = p.color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-
-  ctx.restore();
-
-  // Minimap
-  drawMinimap();
-}
-
-function drawMinimap() {
-  const mmSize = 100;
-  const mmX = W - mmSize - 15;
-  const mmY = H - mmSize - 15;
-  const scale = mmSize / (arenaRadius * 2);
-
-  ctx.fillStyle = 'rgba(0,0,0,0.6)';
-  ctx.beginPath();
-  ctx.arc(mmX + mmSize/2, mmY + mmSize/2, mmSize/2, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = '#f00';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  for (const e of entities) {
-    if (!e.alive) continue;
-    const mx = mmX + mmSize/2 + e.x * scale;
-    const my = mmY + mmSize/2 + e.y * scale;
-    ctx.fillStyle = e.isPlayer ? '#0ff' : '#f44';
-    ctx.beginPath();
-    ctx.arc(mx, my, e.isPlayer ? 4 : 2.5, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  // Outer border
+  mc.beginPath(); mc.arc(cx, cy, sz/2, 0, Math.PI*2);
+  mc.strokeStyle = '#ff2200'; mc.lineWidth = 2; mc.stroke();
 }
 
 // ============ GAME LOOP ============
@@ -750,13 +1048,13 @@ let lastTime = 0;
 function loop(time) {
   const dt = Math.min((time - lastTime) / 1000, 0.05);
   lastTime = time;
-
-  if (gameRunning) {
-    update(dt);
-  }
+  if (gameRunning) update(dt);
   draw();
   requestAnimationFrame(loop);
 }
+
+// Boot Three.js, then start the loop
+initThree();
 requestAnimationFrame(loop);
 </script>
 </body>
