@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Demolition Jam</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #111; overflow: hidden; font-family: 'Arial Black', Arial, sans-serif; }
+canvas { display: block; }
+
+#ui-overlay {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 10;
+}
+
+#hud {
+  position: absolute; top: 10px; left: 10px; color: #fff;
+  font-size: 16px; text-shadow: 2px 2px 4px #000;
+}
+#hud div { margin-bottom: 4px; }
+
+#health-bar-bg {
+  width: 200px; height: 20px; background: #333; border: 2px solid #fff;
+  border-radius: 4px; overflow: hidden;
+}
+#health-bar {
+  width: 100%; height: 100%; background: #0f0;
+  transition: width 0.2s, background-color 0.3s;
+}
+
+#boost-bar-bg {
+  width: 200px; height: 12px; background: #333; border: 2px solid #ff0;
+  border-radius: 4px; overflow: hidden; margin-top: 4px;
+}
+#boost-bar {
+  width: 100%; height: 100%; background: #ff0;
+  transition: width 0.2s;
+}
+
+#score-display {
+  position: absolute; top: 10px; right: 10px; color: #ff0;
+  font-size: 24px; text-shadow: 2px 2px 4px #000;
+}
+
+#message {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  color: #fff; font-size: 48px; text-shadow: 3px 3px 6px #000;
+  display: none; text-align: center; pointer-events: auto;
+}
+
+#menu {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at center, #331a00 0%, #111 70%);
+  pointer-events: auto; z-index: 20;
+}
+#menu h1 {
+  font-size: 64px; color: #f80; text-shadow: 4px 4px 8px #000, 0 0 30px #f80;
+  margin-bottom: 10px;
+}
+#menu h2 {
+  font-size: 20px; color: #fa0; margin-bottom: 30px; font-weight: normal;
+}
+.vehicle-select {
+  display: flex; gap: 15px; flex-wrap: wrap; justify-content: center;
+  max-width: 900px; margin-bottom: 20px;
+}
+.vehicle-btn {
+  background: #222; border: 3px solid #555; border-radius: 10px;
+  padding: 15px 12px; cursor: pointer; text-align: center; width: 130px;
+  transition: all 0.2s; pointer-events: auto; color: #fff;
+}
+.vehicle-btn:hover { border-color: #f80; background: #2a1a00; transform: scale(1.05); }
+.vehicle-btn.selected { border-color: #f80; background: #3a2000; box-shadow: 0 0 15px #f80; }
+.vehicle-btn .icon { font-size: 36px; display: block; margin-bottom: 5px; }
+.vehicle-btn .name { font-size: 13px; font-weight: bold; }
+.vehicle-btn .stats { font-size: 10px; color: #aaa; margin-top: 4px; }
+
+#start-btn {
+  margin-top: 15px; padding: 15px 50px; font-size: 28px;
+  background: #f80; color: #fff; border: none; border-radius: 8px;
+  cursor: pointer; font-family: inherit; text-shadow: 2px 2px 4px #000;
+  pointer-events: auto; transition: all 0.2s;
+}
+#start-btn:hover { background: #fa0; transform: scale(1.05); }
+
+#controls-hint {
+  margin-top: 20px; color: #888; font-size: 13px; text-align: center;
+}
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<div id="ui-overlay">
+  <div id="hud" style="display:none;">
+    <div>HEALTH</div>
+    <div id="health-bar-bg"><div id="health-bar"></div></div>
+    <div style="margin-top:6px;">BOOST</div>
+    <div id="boost-bar-bg"><div id="boost-bar"></div></div>
+    <div id="alive-count" style="margin-top:8px;"></div>
+  </div>
+  <div id="score-display" style="display:none;">SCORE: 0</div>
+  <div id="message"></div>
+</div>
+
+<div id="menu">
+  <h1>DEMOLITION JAM</h1>
+  <h2>Choose Your Ride</h2>
+  <div class="vehicle-select" id="vehicle-select"></div>
+  <button id="start-btn">START</button>
+  <div id="controls-hint">
+    WASD / Arrow Keys to drive &bull; SPACE for boost<br>
+    Smash into enemies to destroy them. Last one standing wins!
+  </div>
+</div>
+
+<script>
+// ============ VEHICLE / ANIMAL DEFINITIONS ============
+const ROSTER = [
+  // Vehicles
+  { id:'monster_truck', name:'Monster Truck', icon:'🛻', type:'vehicle',
+    hp:120, speed:3.2, mass:1.4, size:22, color:'#e22', turnSpeed:0.045,
+    desc:'HP:★★★ SPD:★★ PWR:★★★' },
+  { id:'sports_car', name:'Sports Car', icon:'🏎️', type:'vehicle',
+    hp:70, speed:5.0, mass:0.8, size:18, color:'#22e', turnSpeed:0.06,
+    desc:'HP:★ SPD:★★★ PWR:★★' },
+  { id:'bus', name:'School Bus', icon:'🚌', type:'vehicle',
+    hp:160, speed:2.2, mass:2.0, size:28, color:'#eb0', turnSpeed:0.03,
+    desc:'HP:★★★ SPD:★ PWR:★★★' },
+  { id:'pickup', name:'Pickup Truck', icon:'🚙', type:'vehicle',
+    hp:100, speed:3.8, mass:1.1, size:20, color:'#0a6', turnSpeed:0.05,
+    desc:'HP:★★ SPD:★★ PWR:★★' },
+  { id:'tank', name:'Army Tank', icon:'🪖', type:'vehicle',
+    hp:200, speed:1.8, mass:2.5, size:26, color:'#585', turnSpeed:0.025,
+    desc:'HP:★★★ SPD:★ PWR:★★★' },
+  { id:'ambulance', name:'Ambulance', icon:'🚑', type:'vehicle',
+    hp:110, speed:3.5, mass:1.2, size:21, color:'#fff', turnSpeed:0.04,
+    desc:'HP:★★ SPD:★★ PWR:★★' },
+  // Powerful Animals
+  { id:'trex', name:'T-Rex', icon:'🦖', type:'animal',
+    hp:180, speed:3.0, mass:2.2, size:26, color:'#4a2', turnSpeed:0.035,
+    desc:'HP:★★★ SPD:★★ PWR:★★★' },
+  { id:'triceratops', name:'Triceratops', icon:'🦕', type:'animal',
+    hp:190, speed:2.5, mass:2.4, size:28, color:'#688', turnSpeed:0.03,
+    desc:'HP:★★★ SPD:★ PWR:★★★' },
+  { id:'mammoth', name:'Mammoth', icon:'🦣', type:'animal',
+    hp:200, speed:2.3, mass:2.6, size:30, color:'#864', turnSpeed:0.028,
+    desc:'HP:★★★ SPD:★ PWR:★★★' },
+  { id:'rhino', name:'Rhino', icon:'🦏', type:'animal',
+    hp:150, speed:3.5, mass:1.8, size:24, color:'#999', turnSpeed:0.04,
+    desc:'HP:★★★ SPD:★★ PWR:★★★' },
+  { id:'gorilla', name:'Gorilla', icon:'🦍', type:'animal',
+    hp:130, speed:3.8, mass:1.5, size:22, color:'#444', turnSpeed:0.05,
+    desc:'HP:★★ SPD:★★ PWR:★★' },
+  { id:'bull', name:'Bull', icon:'🐂', type:'animal',
+    hp:110, speed:4.2, mass:1.3, size:20, color:'#811', turnSpeed:0.05,
+    desc:'HP:★★ SPD:★★★ PWR:★★' },
+];
+
+// ============ GAME STATE ============
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+const ARENA_RADIUS = 380;
+const ARENA_SHRINK_RATE = 0.03;
+let arenaRadius;
+let entities = [];
+let particles = [];
+let player = null;
+let score = 0;
+let gameRunning = false;
+let selectedId = 'monster_truck';
+let keys = {};
+let shakeTimer = 0;
+let shakeIntensity = 0;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ============ MENU SETUP ============
+const selectDiv = document.getElementById('vehicle-select');
+ROSTER.forEach(r => {
+  const btn = document.createElement('div');
+  btn.className = 'vehicle-btn' + (r.id === selectedId ? ' selected' : '');
+  btn.innerHTML = `<span class="icon">${r.icon}</span><span class="name">${r.name}</span><span class="stats">${r.desc}</span>`;
+  btn.onclick = () => {
+    document.querySelectorAll('.vehicle-btn').forEach(b => b.classList.remove('selected'));
+    btn.classList.add('selected');
+    selectedId = r.id;
+  };
+  selectDiv.appendChild(btn);
+});
+
+document.getElementById('start-btn').onclick = startGame;
+
+// ============ INPUT ============
+window.addEventListener('keydown', e => { keys[e.code] = true; if(e.code==='Space') e.preventDefault(); });
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ============ ENTITY ============
+function createEntity(def, x, y, angle, isPlayer) {
+  return {
+    x, y, vx: 0, vy: 0, angle,
+    hp: def.hp, maxHp: def.hp,
+    speed: def.speed, mass: def.mass, size: def.size,
+    color: def.color, turnSpeed: def.turnSpeed,
+    name: def.name, icon: def.icon, type: def.type, id: def.id,
+    isPlayer: !!isPlayer,
+    boost: 100, boostCooldown: 0, isBoosting: false,
+    stunTimer: 0, alive: true,
+    aiTimer: 0, aiTarget: null, aiState: 'roam',
+    knockbackX: 0, knockbackY: 0,
+    trail: [],
+  };
+}
+
+// ============ START GAME ============
+function startGame() {
+  document.getElementById('menu').style.display = 'none';
+  document.getElementById('hud').style.display = 'block';
+  document.getElementById('score-display').style.display = 'block';
+  document.getElementById('message').style.display = 'none';
+
+  arenaRadius = ARENA_RADIUS;
+  entities = [];
+  particles = [];
+  score = 0;
+  gameRunning = true;
+
+  const pDef = ROSTER.find(r => r.id === selectedId);
+  player = createEntity(pDef, 0, 0, 0, true);
+  entities.push(player);
+
+  // Spawn 11 AI opponents from random roster picks
+  const enemyCount = 11;
+  for (let i = 0; i < enemyCount; i++) {
+    const angle = (Math.PI * 2 * i) / enemyCount;
+    const dist = 150 + Math.random() * 150;
+    const def = ROSTER[Math.floor(Math.random() * ROSTER.length)];
+    const e = createEntity(def, Math.cos(angle) * dist, Math.sin(angle) * dist, angle + Math.PI, false);
+    entities.push(e);
+  }
+}
+
+// ============ PARTICLES ============
+function spawnParticles(x, y, color, count, speed) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = Math.random() * speed;
+    particles.push({
+      x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s,
+      life: 0.5 + Math.random()*0.5, maxLife: 0.5 + Math.random()*0.5,
+      size: 2 + Math.random()*4, color
+    });
+  }
+}
+
+function spawnExplosion(x, y) {
+  spawnParticles(x, y, '#f80', 30, 6);
+  spawnParticles(x, y, '#ff0', 20, 4);
+  spawnParticles(x, y, '#f00', 15, 5);
+  shakeTimer = 0.3;
+  shakeIntensity = 8;
+}
+
+// ============ AI ============
+function updateAI(e, dt) {
+  if (e.stunTimer > 0) return;
+  e.aiTimer -= dt;
+
+  if (e.aiTimer <= 0) {
+    e.aiTimer = 0.5 + Math.random() * 1.0;
+    // Pick closest alive target
+    let closest = null, closestD = Infinity;
+    for (const other of entities) {
+      if (other === e || !other.alive) continue;
+      const d = Math.hypot(other.x - e.x, other.y - e.y);
+      if (d < closestD) { closestD = d; closest = other; }
+    }
+    e.aiTarget = closest;
+    e.aiState = closestD < 120 ? 'charge' : 'roam';
+  }
+
+  let targetAngle;
+  if (e.aiTarget && e.aiTarget.alive) {
+    targetAngle = Math.atan2(e.aiTarget.y - e.y, e.aiTarget.x - e.x);
+  } else {
+    targetAngle = Math.atan2(-e.y, -e.x); // go toward center
+  }
+
+  // Steer toward target
+  let diff = targetAngle - e.angle;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  e.angle += Math.sign(diff) * Math.min(Math.abs(diff), e.turnSpeed * 60 * dt);
+
+  // Accelerate
+  const spd = e.speed * (e.aiState === 'charge' ? 1.2 : 0.8);
+  e.vx += Math.cos(e.angle) * spd * dt * 60 * 0.08;
+  e.vy += Math.sin(e.angle) * spd * dt * 60 * 0.08;
+
+  // Boost occasionally when charging
+  if (e.aiState === 'charge' && e.boost > 40 && Math.random() < 0.02) {
+    e.isBoosting = true;
+    e.boost -= 30;
+  } else {
+    e.isBoosting = false;
+  }
+
+  // Avoid arena edge
+  const distFromCenter = Math.hypot(e.x, e.y);
+  if (distFromCenter > arenaRadius * 0.75) {
+    const inward = Math.atan2(-e.y, -e.x);
+    e.vx += Math.cos(inward) * 0.5;
+    e.vy += Math.sin(inward) * 0.5;
+  }
+}
+
+// ============ COLLISIONS ============
+function handleCollisions() {
+  for (let i = 0; i < entities.length; i++) {
+    const a = entities[i];
+    if (!a.alive) continue;
+    for (let j = i + 1; j < entities.length; j++) {
+      const b = entities[j];
+      if (!b.alive) continue;
+
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.hypot(dx, dy);
+      const minDist = a.size + b.size;
+      if (dist < minDist && dist > 0) {
+        // Separate
+        const nx = dx / dist, ny = dy / dist;
+        const overlap = minDist - dist;
+        const totalMass = a.mass + b.mass;
+        a.x -= nx * overlap * (b.mass / totalMass);
+        a.y -= ny * overlap * (b.mass / totalMass);
+        b.x += nx * overlap * (a.mass / totalMass);
+        b.y += ny * overlap * (a.mass / totalMass);
+
+        // Impact force based on relative velocity
+        const relVx = a.vx - b.vx, relVy = a.vy - b.vy;
+        const impactSpeed = Math.abs(relVx * nx + relVy * ny);
+
+        if (impactSpeed > 1.5) {
+          // Damage
+          const baseDmg = impactSpeed * 3;
+          const dmgToB = baseDmg * (a.mass / b.mass) * (a.isBoosting ? 1.8 : 1);
+          const dmgToA = baseDmg * (b.mass / a.mass) * (b.isBoosting ? 1.8 : 1);
+
+          b.hp -= dmgToB;
+          a.hp -= dmgToA;
+          b.stunTimer = Math.min(impactSpeed * 0.05, 0.3);
+          a.stunTimer = Math.min(impactSpeed * 0.05, 0.3);
+
+          // Knockback
+          const kb = impactSpeed * 0.5;
+          a.knockbackX -= nx * kb * (b.mass / a.mass);
+          a.knockbackY -= ny * kb * (b.mass / a.mass);
+          b.knockbackX += nx * kb * (a.mass / b.mass);
+          b.knockbackY += ny * kb * (a.mass / b.mass);
+
+          // Particles at collision point
+          const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+          spawnParticles(cx, cy, '#ff0', 6, 3);
+          spawnParticles(cx, cy, '#fa0', 4, 2);
+
+          if (impactSpeed > 4) {
+            shakeTimer = 0.15;
+            shakeIntensity = 4;
+          }
+
+          // Track score for player kills
+          if (b.hp <= 0 && a.isPlayer) score += 100;
+          if (a.hp <= 0 && b.isPlayer) score += 25; // partial points
+        }
+
+        // Elastic bounce
+        const bounce = 0.6;
+        const dvn = relVx * nx + relVy * ny;
+        a.vx -= dvn * nx * bounce * (b.mass / totalMass);
+        a.vy -= dvn * ny * bounce * (b.mass / totalMass);
+        b.vx += dvn * nx * bounce * (a.mass / totalMass);
+        b.vy += dvn * ny * bounce * (a.mass / totalMass);
+      }
+    }
+  }
+}
+
+// ============ UPDATE ============
+function update(dt) {
+  if (!gameRunning) return;
+
+  // Shrink arena
+  if (arenaRadius > 150) arenaRadius -= ARENA_SHRINK_RATE * dt * 60;
+
+  // Player input
+  if (player && player.alive && player.stunTimer <= 0) {
+    const left = keys['ArrowLeft'] || keys['KeyA'];
+    const right = keys['ArrowRight'] || keys['KeyD'];
+    const up = keys['ArrowUp'] || keys['KeyW'];
+    const down = keys['ArrowDown'] || keys['KeyS'];
+    const boost = keys['Space'];
+
+    if (left) player.angle -= player.turnSpeed * dt * 60;
+    if (right) player.angle += player.turnSpeed * dt * 60;
+
+    let accel = 0;
+    if (up) accel = player.speed;
+    if (down) accel = -player.speed * 0.5;
+
+    player.isBoosting = false;
+    if (boost && player.boost > 0 && up) {
+      accel *= 1.8;
+      player.boost -= dt * 60;
+      player.isBoosting = true;
+    }
+
+    player.vx += Math.cos(player.angle) * accel * dt * 60 * 0.08;
+    player.vy += Math.sin(player.angle) * accel * dt * 60 * 0.08;
+  }
+
+  // Boost regeneration
+  for (const e of entities) {
+    if (e.alive && !e.isBoosting && e.boost < 100) {
+      e.boost = Math.min(100, e.boost + dt * 15);
+    }
+  }
+
+  // AI
+  for (const e of entities) {
+    if (!e.isPlayer && e.alive) updateAI(e, dt);
+  }
+
+  // Physics
+  for (const e of entities) {
+    if (!e.alive) continue;
+
+    e.stunTimer = Math.max(0, e.stunTimer - dt);
+
+    // Apply knockback
+    e.vx += e.knockbackX;
+    e.vy += e.knockbackY;
+    e.knockbackX *= 0.8;
+    e.knockbackY *= 0.8;
+
+    // Move
+    e.x += e.vx;
+    e.y += e.vy;
+
+    // Friction
+    e.vx *= 0.96;
+    e.vy *= 0.96;
+
+    // Arena boundary
+    const distFromCenter = Math.hypot(e.x, e.y);
+    if (distFromCenter > arenaRadius - e.size) {
+      const nx = e.x / distFromCenter, ny = e.y / distFromCenter;
+      const targetDist = arenaRadius - e.size;
+      e.x = nx * targetDist;
+      e.y = ny * targetDist;
+      // Bounce inward
+      const dot = e.vx * nx + e.vy * ny;
+      e.vx -= 1.5 * dot * nx;
+      e.vy -= 1.5 * dot * ny;
+      // Arena edge damage
+      e.hp -= dt * 20;
+      spawnParticles(e.x + nx * e.size, e.y + ny * e.size, '#f44', 2, 2);
+    }
+
+    // Trail
+    if (Math.hypot(e.vx, e.vy) > 1.5) {
+      e.trail.push({ x: e.x, y: e.y, life: 0.3 });
+    }
+    e.trail = e.trail.filter(t => { t.life -= dt; return t.life > 0; });
+
+    // Death
+    if (e.hp <= 0 && e.alive) {
+      e.alive = false;
+      spawnExplosion(e.x, e.y);
+      if (!e.isPlayer) score += 50;
+    }
+  }
+
+  handleCollisions();
+
+  // Particles
+  for (const p of particles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.95;
+    p.vy *= 0.95;
+    p.life -= dt;
+  }
+  particles = particles.filter(p => p.life > 0);
+
+  // Shake
+  if (shakeTimer > 0) shakeTimer -= dt;
+
+  // Check win/lose
+  const aliveEnemies = entities.filter(e => !e.isPlayer && e.alive).length;
+  if (player && !player.alive) {
+    endGame(false, aliveEnemies);
+  } else if (aliveEnemies === 0 && player && player.alive) {
+    endGame(true, 0);
+  }
+
+  // Update HUD
+  updateHUD(aliveEnemies);
+}
+
+function updateHUD(aliveEnemies) {
+  if (!player) return;
+  const hpPct = Math.max(0, player.hp / player.maxHp * 100);
+  const hpBar = document.getElementById('health-bar');
+  hpBar.style.width = hpPct + '%';
+  hpBar.style.backgroundColor = hpPct > 50 ? '#0f0' : hpPct > 25 ? '#fa0' : '#f00';
+
+  document.getElementById('boost-bar').style.width = player.boost + '%';
+  document.getElementById('score-display').textContent = 'SCORE: ' + score;
+  document.getElementById('alive-count').textContent =
+    'Opponents: ' + (aliveEnemies) + ' / 11';
+}
+
+function endGame(won, remaining) {
+  gameRunning = false;
+  const msg = document.getElementById('message');
+  msg.style.display = 'block';
+  if (won) {
+    msg.innerHTML = '🏆 VICTORY! 🏆<br><span style="font-size:24px">Score: ' + score +
+      '</span><br><span style="font-size:18px; color:#aaa">Click to play again</span>';
+  } else {
+    msg.innerHTML = '💥 WRECKED! 💥<br><span style="font-size:24px">Score: ' + score +
+      ' &bull; ' + remaining + ' left</span><br><span style="font-size:18px; color:#aaa">Click to play again</span>';
+  }
+  msg.onclick = () => {
+    msg.style.display = 'none';
+    document.getElementById('menu').style.display = 'flex';
+    document.getElementById('hud').style.display = 'none';
+    document.getElementById('score-display').style.display = 'none';
+  };
+}
+
+// ============ DRAW ============
+function draw() {
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+
+  // Camera follows player
+  let camX = 0, camY = 0;
+  if (player) { camX = player.x; camY = player.y; }
+
+  // Screen shake
+  let sx = 0, sy = 0;
+  if (shakeTimer > 0) {
+    sx = (Math.random() - 0.5) * shakeIntensity * 2;
+    sy = (Math.random() - 0.5) * shakeIntensity * 2;
+  }
+
+  ctx.translate(W/2 + sx - camX, H/2 + sy - camY);
+
+  // Arena floor
+  ctx.beginPath();
+  ctx.arc(0, 0, arenaRadius, 0, Math.PI * 2);
+  ctx.fillStyle = '#2a2215';
+  ctx.fill();
+
+  // Arena grid
+  ctx.strokeStyle = '#3a3225';
+  ctx.lineWidth = 1;
+  const gridSize = 50;
+  for (let x = -arenaRadius; x <= arenaRadius; x += gridSize) {
+    ctx.beginPath(); ctx.moveTo(x, -arenaRadius); ctx.lineTo(x, arenaRadius); ctx.stroke();
+  }
+  for (let y = -arenaRadius; y <= arenaRadius; y += gridSize) {
+    ctx.beginPath(); ctx.moveTo(-arenaRadius, y); ctx.lineTo(arenaRadius, y); ctx.stroke();
+  }
+
+  // Arena border - danger zone
+  ctx.beginPath();
+  ctx.arc(0, 0, arenaRadius, 0, Math.PI * 2);
+  ctx.strokeStyle = '#f00';
+  ctx.lineWidth = 4;
+  ctx.setLineDash([10, 10]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Danger ring glow
+  ctx.beginPath();
+  ctx.arc(0, 0, arenaRadius, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,0,0,0.15)';
+  ctx.lineWidth = 20;
+  ctx.stroke();
+
+  // Trails
+  for (const e of entities) {
+    for (const t of e.trail) {
+      const alpha = t.life / 0.3 * 0.3;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,150,0,${alpha})`;
+      ctx.fill();
+    }
+  }
+
+  // Entities
+  for (const e of entities) {
+    if (!e.alive) continue;
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.rotate(e.angle);
+
+    // Body shape
+    ctx.beginPath();
+    if (e.type === 'vehicle') {
+      // Rectangular body for vehicles
+      ctx.fillStyle = e.color;
+      ctx.fillRect(-e.size, -e.size * 0.6, e.size * 2, e.size * 1.2);
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-e.size, -e.size * 0.6, e.size * 2, e.size * 1.2);
+      // Front bumper
+      ctx.fillStyle = '#888';
+      ctx.fillRect(e.size * 0.8, -e.size * 0.7, e.size * 0.3, e.size * 1.4);
+    } else {
+      // Rounded body for animals
+      ctx.beginPath();
+      ctx.ellipse(0, 0, e.size, e.size * 0.7, 0, 0, Math.PI * 2);
+      ctx.fillStyle = e.color;
+      ctx.fill();
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Head
+      ctx.beginPath();
+      ctx.arc(e.size * 0.7, 0, e.size * 0.4, 0, Math.PI * 2);
+      ctx.fillStyle = e.color;
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    // Boost flame
+    if (e.isBoosting) {
+      ctx.fillStyle = '#f80';
+      ctx.beginPath();
+      ctx.moveTo(-e.size, -e.size * 0.3);
+      ctx.lineTo(-e.size - 10 - Math.random() * 10, 0);
+      ctx.lineTo(-e.size, e.size * 0.3);
+      ctx.fill();
+      ctx.fillStyle = '#ff0';
+      ctx.beginPath();
+      ctx.moveTo(-e.size, -e.size * 0.15);
+      ctx.lineTo(-e.size - 5 - Math.random() * 8, 0);
+      ctx.lineTo(-e.size, e.size * 0.15);
+      ctx.fill();
+    }
+
+    // Stun indicator
+    if (e.stunTimer > 0) {
+      ctx.fillStyle = 'rgba(255,255,0,0.3)';
+      ctx.beginPath();
+      ctx.arc(0, 0, e.size + 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+
+    // Icon and name above
+    ctx.font = `${e.size}px serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(e.icon, e.x, e.y - e.size - 8);
+
+    // Health bar above entity
+    if (e.hp < e.maxHp) {
+      const barW = e.size * 2;
+      const barH = 4;
+      const barY = e.y - e.size - 22;
+      ctx.fillStyle = '#400';
+      ctx.fillRect(e.x - barW/2, barY, barW, barH);
+      ctx.fillStyle = e.hp > e.maxHp * 0.5 ? '#0f0' : e.hp > e.maxHp * 0.25 ? '#fa0' : '#f00';
+      ctx.fillRect(e.x - barW/2, barY, barW * (e.hp / e.maxHp), barH);
+    }
+
+    // Player indicator
+    if (e.isPlayer) {
+      ctx.strokeStyle = '#0ff';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, e.size + 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // Particles
+  for (const p of particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+
+  // Minimap
+  drawMinimap();
+}
+
+function drawMinimap() {
+  const mmSize = 100;
+  const mmX = W - mmSize - 15;
+  const mmY = H - mmSize - 15;
+  const scale = mmSize / (arenaRadius * 2);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.beginPath();
+  ctx.arc(mmX + mmSize/2, mmY + mmSize/2, mmSize/2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#f00';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  for (const e of entities) {
+    if (!e.alive) continue;
+    const mx = mmX + mmSize/2 + e.x * scale;
+    const my = mmY + mmSize/2 + e.y * scale;
+    ctx.fillStyle = e.isPlayer ? '#0ff' : '#f44';
+    ctx.beginPath();
+    ctx.arc(mx, my, e.isPlayer ? 4 : 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// ============ GAME LOOP ============
+let lastTime = 0;
+function loop(time) {
+  const dt = Math.min((time - lastTime) / 1000, 0.05);
+  lastTime = time;
+
+  if (gameRunning) {
+    update(dt);
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
